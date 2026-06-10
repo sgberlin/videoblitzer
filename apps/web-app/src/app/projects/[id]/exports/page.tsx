@@ -1,2 +1,2 @@
-import { FormatSelector, OutputFormatCards, ReadinessChecklist } from "../../../../components/Cards";
-export default function Page(){return <section className="grid"><FormatSelector /><OutputFormatCards /><ReadinessChecklist /></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="exports" />; }

@@ -1,1 +1,2 @@
-export default function Page(){return <section className="card"><h2>Debug</h2><p>Job IDs, source storage keys, analysis metadata, and generation prompts will appear here for owner/admin troubleshooting.</p></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="debug" />; }

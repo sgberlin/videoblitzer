@@ -1,2 +1,2 @@
-import { StatsEditor } from "../../../../components/StatsEditor";
-export default function Page(){return <section><h2>Confirm match data</h2><StatsEditor /></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="match-data" />; }

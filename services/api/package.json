@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --noEmit",
+    "build": "npm run typecheck && esbuild src/server.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:@aws-sdk/* --external:@supabase/supabase-js --external:cors --external:dotenv --external:express --external:express-rate-limit --external:helmet --external:stripe --external:zod",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
@@ -28,6 +28,7 @@
   "devDependencies": {
     "@types/cors": "latest",
     "@types/express": "latest",
+    "esbuild": "latest",
     "tsx": "latest",
     "typescript": "latest"
   }

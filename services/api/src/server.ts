@@ -6,10 +6,12 @@ import { adminRouter } from "./routes/admin";
 import { authRouter } from "./routes/auth";
 import { billingRouter } from "./routes/billing";
 import { contactRouter } from "./routes/contact";
+import { dashboardRouter } from "./routes/dashboard";
 import { generationRouter } from "./routes/generation";
 import { jobsRouter } from "./routes/jobs";
 import { matchDataRouter } from "./routes/matchData";
 import { projectsRouter } from "./routes/projects";
+import { storageRouter } from "./routes/storage";
 import { uploadsRouter } from "./routes/uploads";
 
 const app = express();
@@ -19,10 +21,12 @@ app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "videoblitzer-api", product: config.APP_NAME }));
 app.use("/auth", authRouter);
+app.use("/dashboard", dashboardRouter);
 app.use("/projects", projectsRouter);
 app.use("/uploads", uploadsRouter);
 app.use("/jobs", jobsRouter);
 app.use("/match-data", matchDataRouter);
+app.use("/storage", storageRouter);
 app.use(generationRouter);
 app.use("/contact", contactRouter);
 app.use(billingRouter);

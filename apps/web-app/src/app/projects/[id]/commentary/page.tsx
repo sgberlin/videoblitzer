@@ -1,1 +1,2 @@
-export default function Page(){return <section className="card"><h2>Commentary</h2><p>Commentary scripts must not invent goals, players, coaches, stats, or cards.</p></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="commentary" />; }

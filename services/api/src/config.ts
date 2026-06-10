@@ -1,5 +1,8 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import { z } from "zod";
+
+dotenv.config();
+dotenv.config({ path: process.env.API_ENV_PATH ?? "/var/www/videoblitzer-api/.env" });
 
 const envSchema = z.object({
   APP_NAME: z.string().default("VideoBlitzer"),

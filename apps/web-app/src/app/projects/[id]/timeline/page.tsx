@@ -1,2 +1,2 @@
-import { TimelineClipCard } from "../../../../components/Cards";
-export default function Page(){return <section className="grid"><TimelineClipCard /></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="timeline" />; }

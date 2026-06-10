@@ -1,3 +1,2 @@
-import { CreditBadge, OwnerModeBadge } from "../../components/Badges";
-import { ProjectCard } from "../../components/Cards";
-export default function DashboardPage() { return <><section className="hero"><OwnerModeBadge /><h1>VideoBlitzer dashboard</h1><p className="muted">Create match projects, upload recordings, and package verified highlights for publishing.</p><div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><button className="button secondary">Download Desktop Recorder</button></div><CreditBadge credits="Unlimited" /></section><br /><section className="grid grid-3"><ProjectCard title="Recent Projects" status="No active projects yet" /><ProjectCard title="Pending Exports" status="0 queued" /><ProjectCard title="Failed Jobs" status="0 failed" /><ProjectCard title="Storage Usage" status="Connect R2 for live usage" /></section></>; }
+import { DashboardClient } from "./DashboardClient";
+export default function DashboardPage() { return <DashboardClient />; }

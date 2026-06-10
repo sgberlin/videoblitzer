@@ -1,1 +1,2 @@
-export default function Page(){return <section className="card"><h2>Highlight candidates</h2><p>Signals include manual markers, audio spikes, mic reaction, scoreboard changes, replay scenes, scene changes, post-match stats, and user confirmed events.</p></section>}
+import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
+export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="highlights" />; }
