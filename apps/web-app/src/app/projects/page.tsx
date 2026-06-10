@@ -1,0 +1,3 @@
+"use client";
+import { useState } from "react";
+export default function ProjectsPage() { const [title, setTitle] = useState("Saturday Match Highlights"); return <section className="hero"><h1>Create a match project</h1><p className="muted">Projects keep the source video, match data, highlight timeline, thumbnail, social pack, and exports together.</p><input className="input" value={title} onChange={(e) => setTitle(e.target.value)} /><br /><br /><a className="button" href={`/projects/${encodeURIComponent(title.toLowerCase().replaceAll(" ", "-"))}/overview`}>Create Project Workspace</a></section>; }

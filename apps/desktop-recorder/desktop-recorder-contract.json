@@ -1,0 +1,26 @@
+{
+  "product": "VideoBlitzer",
+  "version": "0.1.0",
+  "uploadMetadata": {
+    "recordingId": "uuid",
+    "projectId": "uuid optional",
+    "sourceMode": "Game Window | Main Screen | Monitor 1 | Monitor 2 | Multiple Screens | Game + Webcam | Game + Second Window | Separate Tracks",
+    "localFileName": "string",
+    "durationSeconds": "number",
+    "tracks": [
+      "game",
+      "microphone",
+      "system_audio",
+      "webcam"
+    ],
+    "markers": [
+      {
+        "timeSeconds": 120,
+        "type": "goal | highlight | funny | reaction | mistake",
+        "hotkey": "F10"
+      }
+    ],
+    "replayBufferSeconds": 30,
+    "createdAt": "ISO-8601"
+  }
+}

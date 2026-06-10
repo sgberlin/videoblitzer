@@ -1,0 +1,3 @@
+import { ConfidenceBadge } from "./Badges";
+const fields = ["Teams", "Team colors", "Team short codes", "Score", "Coach", "Formation", "Starting XI", "Bench", "Captain", "Venue", "Date", "Competition", "Possession", "Shots", "Shots on target", "Corners", "Fouls", "Cards", "Pass accuracy", "xG", "Goal scorers", "Goal times", "Key moments"];
+export function StatsEditor() { return <div className="grid grid-2">{fields.map((field) => <label className="card" key={field}><strong>{field}</strong><input className="input" placeholder="Enter or confirm value" /><p><ConfidenceBadge label="Low" /> <span className="muted">source: manual_entry · confirmed: false</span></p></label>)}</div>; }

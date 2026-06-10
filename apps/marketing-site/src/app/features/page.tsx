@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Features</h1><p className="muted">Highlights, Shorts, captions, commentary, thumbnails, match stats, and social packages from one controlled workspace.</p></main>}

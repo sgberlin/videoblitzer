@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">How It Works</h1><p className="muted">Upload or record, analyze moments, confirm stats, choose outputs, build the thumbnail and social pack, then export.</p></main>}

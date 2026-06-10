@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Privacy Policy</h1><p className="muted">Recording happens locally when using the desktop app. Uploads happen only when users choose. Files are stored in Cloudflare R2.</p></main>}

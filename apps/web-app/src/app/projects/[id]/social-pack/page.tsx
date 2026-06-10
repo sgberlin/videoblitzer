@@ -1,0 +1,2 @@
+import { CopyBlock } from "../../../../components/Cards";
+export default function Page(){const blocks=["YouTube title variants","YouTube description","Chapters","Pinned comment","TikTok caption","Instagram caption","X post","Hashtags","Thumbnail text options","Posting strategy","Multi-language variants"];return <section className="grid grid-2">{blocks.map((b)=><CopyBlock key={b} title={b} copy="Generated copy will use only confirmed match and project data." />)}</section>}

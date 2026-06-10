@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Product Manual</h1><p className="muted">Learn how uploads, recording, stats confirmation, highlight detection, Shorts, thumbnails, commentary, credits, and troubleshooting work.</p></main>}

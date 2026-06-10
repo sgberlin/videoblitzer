@@ -1,0 +1,5 @@
+{
+  "framework": "nextjs",
+  "buildCommand": "cd ../.. && npm run build --workspace @videoblitzer/marketing-site",
+  "outputDirectory": "apps/marketing-site/.next"
+}

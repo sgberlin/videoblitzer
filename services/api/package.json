@@ -1,0 +1,34 @@
+{
+  "name": "@videoblitzer/api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "latest",
+    "@aws-sdk/s3-request-presigner": "latest",
+    "@supabase/supabase-js": "latest",
+    "@videoblitzer/export-presets": "file:../../packages/export-presets",
+    "@videoblitzer/prompts": "file:../../packages/prompts",
+    "@videoblitzer/shared-types": "file:../../packages/shared-types",
+    "@videoblitzer/thumbnail-engine": "file:../../packages/thumbnail-engine",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "latest",
+    "express-rate-limit": "latest",
+    "helmet": "latest",
+    "stripe": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "@types/cors": "latest",
+    "@types/express": "latest",
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,1 @@
+export default function Page(){return <section className="card"><span className="pill">Owner only</span><h1>Admin Jobs</h1><p className="muted">View, troubleshoot, and operate VideoBlitzer jobs from the owner dashboard.</p></section>}

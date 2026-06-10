@@ -1,0 +1,23 @@
+{
+  "name": "@videoblitzer/video-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@videoblitzer/export-presets": "file:../../packages/export-presets",
+    "@videoblitzer/highlight-engine": "file:../../packages/highlight-engine",
+    "@videoblitzer/shared-types": "file:../../packages/shared-types",
+    "dotenv": "latest",
+    "zod": "latest"
+  },
+  "devDependencies": {
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

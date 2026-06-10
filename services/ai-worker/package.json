@@ -1,0 +1,22 @@
+{
+  "name": "@videoblitzer/ai-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc --noEmit",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@videoblitzer/prompts": "file:../../packages/prompts",
+    "@videoblitzer/shared-types": "file:../../packages/shared-types",
+    "dotenv": "latest",
+    "openai": "latest"
+  },
+  "devDependencies": {
+    "tsx": "latest",
+    "typescript": "latest"
+  }
+}

@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Contact</h1><p className="muted">Request private access or describe your match content workflow. Contact messages are validated and stored server-side.</p></main>}

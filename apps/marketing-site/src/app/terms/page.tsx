@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Terms of Service</h1><p className="muted">Weekly subscriptions renew automatically unless cancelled. Users are responsible for rights to uploaded footage and third-party materials.</p></main>}

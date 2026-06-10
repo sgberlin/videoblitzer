@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">About Us</h1><p className="muted">VideoBlitzer was built to turn long recordings into publish-ready highlights, Shorts, thumbnails, captions, stats, and social content packs.</p></main>}

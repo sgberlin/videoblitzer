@@ -1,0 +1,1 @@
+export default function Page(){return <section className="card"><h2>Main workflow</h2><p>1. Upload or record video → 2. Analyze → 3. Confirm stats/data → 4. Choose outputs → 5. Edit timeline → 6. Build thumbnail → 7. Generate social pack → 8. Export.</p></section>}

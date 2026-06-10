@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Download</h1><p className="muted">The desktop recorder scaffold is prepared for local recording, replay buffers, hotkeys, and dashboard upload.</p></main>}

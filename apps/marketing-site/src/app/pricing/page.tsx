@@ -1,0 +1,1 @@
+export default function Page(){return <main className="hero"><span className="pill">VideoBlitzer</span><h1 className="headline">Pricing / Private Beta</h1><p className="muted">Weekly tiers are prepared for Starter, Creator, and Pro plans, but public sales are disabled by default.</p></main>}
