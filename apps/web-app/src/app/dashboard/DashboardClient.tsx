@@ -24,7 +24,10 @@ export function DashboardClient() {
   }, []);
 
   if (loading) return <section className="hero"><h1>Loading dashboard</h1><p className="muted">Checking private beta access and loading your workspace.</p></section>;
-  if (error) return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><a className="button" href="/login">Sign in</a></section>;
+  if (error) {
+    const isAuthError = error.toLowerCase().includes("session") || error.toLowerCase().includes("unauthorized") || error.toLowerCase().includes("sign in");
+    return <section className="hero"><h1>{isAuthError ? "Sign in required" : "Dashboard unavailable"}</h1><p className="warning">{error}</p><p className="muted">{isAuthError ? "Use the newest magic link from your email. If it has expired, request another code." : "The API is reachable, but the dashboard data could not be loaded."}</p><a className="button" href="/login">Back to login</a></section>;
+  }
   if (!data) return null;
 
   return <>
