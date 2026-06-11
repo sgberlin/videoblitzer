@@ -7,13 +7,14 @@ export const projectsRouter = Router();
 projectsRouter.use(requireAuth);
 
 projectsRouter.post("/", async (req, res) => {
-  const body = z.object({ title: z.string().min(2), homeTeam: z.string().optional(), awayTeam: z.string().optional() }).parse(req.body);
+  const body = z.object({ title: z.string().min(2), homeTeam: z.string().optional(), awayTeam: z.string().optional(), source_type: z.string().optional(), sourceType: z.string().optional() }).parse(req.body);
   const supabase = createServiceClient();
-  const project = { id: crypto.randomUUID(), owner_id: req.user!.id, title: body.title, home_team: body.homeTeam, away_team: body.awayTeam, status: "draft" };
+  const sourceType = body.sourceType ?? body.source_type ?? "web_app";
+  const project = { id: crypto.randomUUID(), owner_id: req.user!.id, user_id: req.user!.id, title: body.title, home_team: body.homeTeam, away_team: body.awayTeam, source_type: sourceType, status: "draft" };
   if (supabase) {
     const { error } = await supabase.from("projects").insert(project);
     if (error) return res.status(500).json({ error: error.message });
-    await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: project.id, event_name: "project_created", metadata: { title: body.title } });
+    await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: project.id, event_name: "project_created", metadata: { title: body.title, sourceType } });
   }
   return res.status(201).json({ project });
 });

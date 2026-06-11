@@ -45,7 +45,7 @@ export async function createSignedUploadUrl(userId: string, projectId: string, f
     },
   });
   const uploadUrl = await getSignedUrl(client, command, { expiresIn: 900 });
-  return { key, uploadUrl, expiresIn: 900, expiresAt: new Date(Date.now() + 900_000).toISOString(), method: "PUT", mode: "signed_url" };
+  return { key, objectKey: key, uploadUrl, signedUrl: uploadUrl, expiresIn: 900, expiresAt: new Date(Date.now() + 900_000).toISOString(), method: "PUT", requiredHeaders: { "Content-Type": contentType }, mode: "signed_url" };
 }
 
 export async function readR2Usage(): Promise<R2UsageSummary> {

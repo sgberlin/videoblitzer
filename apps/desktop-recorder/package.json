@@ -3,18 +3,21 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "main": "src/main.ts",
+  "main": "dist/main.js",
   "scripts": {
-    "dev": "tsx src/main.ts",
-    "build": "tsc --noEmit",
+    "dev": "npm run build && electron .",
+    "build": "tsc && node scripts/copy-assets.mjs",
     "lint": "tsc --noEmit",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "package:mac": "npm run build && electron-builder --mac dmg --config electron-builder.json",
+    "package:win": "npm run build && electron-builder --win nsis --config electron-builder.json"
   },
   "dependencies": {
     "electron": "latest"
   },
   "devDependencies": {
     "tsx": "latest",
-    "typescript": "latest"
+    "typescript": "latest",
+    "electron-builder": "latest"
   }
 }

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; media-src 'self' blob:; connect-src https: blob:; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VideoBlitzer Recorder</title>
+  <link rel="stylesheet" href="./styles.css" />
+</head>
+<body>
+  <main class="app-shell">
+    <header class="hero">
+      <div><span class="pill">Private beta recorder</span><h1>VideoBlitzer Recorder</h1><p>Record matches on your desktop, save WebM locally, upload to VideoBlitzer, and queue MP4 conversion.</p></div>
+      <div class="status-stack"><span id="apiStatus" class="status muted">API: checking...</span><span id="authStatus" class="status warning">Auth: token required</span></div>
+    </header>
+
+    <section class="grid two">
+      <section class="card"><h2>1. Source</h2><button id="refreshSources" class="button">Select screen/window</button><p id="selectedSourceLabel" class="muted">No source selected.</p><div id="sources" class="sources"></div><video id="preview" autoplay muted playsinline></video></section>
+      <section class="card"><h2>2. Recording</h2><div class="controls"><button id="startRecording" class="button" disabled>Start Recording</button><button id="stopRecording" class="button secondary" disabled>Stop Recording</button></div><div id="timer" class="timer">00:00</div><p>Status: <span id="recordingStatus" class="status">Idle</span></p><p class="muted">System audio support depends on operating system and capture source.</p></section>
+    </section>
+
+    <section class="grid two">
+      <section class="card"><h2>3. Format</h2><p>Raw recording format: <strong>WebM</strong></p><p>MP4 export: <strong>Backend conversion</strong></p><label>Recording MIME type</label><select id="mimeSelect" class="input"></select><p class="muted">Native MP4 recording appears only if this Electron runtime reports support. WebM remains the default.</p></section>
+      <section class="card"><h2>4. Local file</h2><p id="savedPath" class="path muted">No recording saved yet.</p><button id="openLocation" class="button secondary" disabled>Open file location</button></section>
+    </section>
+
+    <section class="grid two">
+      <section class="card"><h2>5. Upload</h2><button id="uploadRecording" class="button" disabled>Upload to VideoBlitzer</button><p id="uploadStatus" class="muted">Record a WebM file before uploading.</p><div class="progress"><div id="uploadBar"></div></div><p>Progress: <span id="uploadPercent">0%</span></p><p>R2 object key:</p><p id="objectKey" class="path muted">Not uploaded.</p><p>Project ID: <span id="projectId" class="muted">None</span></p><p id="projectLink"></p></section>
+      <section class="card"><h2>6. Settings</h2><label>API URL</label><input id="apiUrl" class="input" value="https://api.videoblitzer.com" /><label>Temporary access token for private beta testing</label><textarea id="accessToken" class="input" rows="4" placeholder="Paste Supabase access token"></textarea><label class="check"><input id="rememberToken" type="checkbox" /> Remember token on this device</label><label class="check"><input id="includeMic" type="checkbox" /> Include microphone audio</label><label>Recording quality</label><select id="quality" class="input"><option value="standard">Standard (5 Mbps)</option><option value="high">High (10 Mbps)</option><option value="match">Match Quality (15 Mbps)</option></select><button id="selectFolder" class="button secondary">Choose output folder</button><p id="outputFolder" class="muted">Default: Videos folder</p></section>
+    </section>
+  </main>
+  <script src="./renderer.js"></script>
+</body>
+</html>

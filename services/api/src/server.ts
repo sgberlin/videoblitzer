@@ -7,6 +7,7 @@ import { authRouter } from "./routes/auth";
 import { billingRouter } from "./routes/billing";
 import { contactRouter } from "./routes/contact";
 import { dashboardRouter } from "./routes/dashboard";
+import { exportsRouter } from "./routes/exports";
 import { generationRouter } from "./routes/generation";
 import { jobsRouter } from "./routes/jobs";
 import { matchDataRouter } from "./routes/matchData";
@@ -16,7 +17,14 @@ import { uploadsRouter } from "./routes/uploads";
 
 const app = express();
 app.use(helmet());
-app.use(cors({ origin: [config.APP_URL, "http://localhost:3000", "http://localhost:3001"], credentials: true }));
+const allowedOrigins = new Set([config.APP_URL, "http://localhost:3000", "http://localhost:3001", "file://"]);
+app.use(cors({
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    return callback(new Error("Origin not allowed by VideoBlitzer API CORS policy"));
+  },
+  credentials: true,
+}));
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "videoblitzer-api", product: config.APP_NAME }));
@@ -25,6 +33,7 @@ app.use("/dashboard", dashboardRouter);
 app.use("/projects", projectsRouter);
 app.use("/uploads", uploadsRouter);
 app.use("/jobs", jobsRouter);
+app.use("/exports", exportsRouter);
 app.use("/match-data", matchDataRouter);
 app.use("/storage", storageRouter);
 app.use(generationRouter);

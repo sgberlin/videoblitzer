@@ -1,5 +1,6 @@
 import { createHighlightCandidate } from "@videoblitzer/highlight-engine";
 import { clipCommand, extractFrameCommand, probeCommand, shortsExportCommand } from "./ffmpeg";
+export { convertWebmToMp4FromR2 } from "./r2Conversion";
 
 export async function analyzeVideo(projectId: string, inputPath: string) {
   return { projectId, status: "metadata_ready", probe: probeCommand(inputPath), candidates: createHighlightCandidates(projectId) };

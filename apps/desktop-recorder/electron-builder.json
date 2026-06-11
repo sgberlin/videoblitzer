@@ -1,0 +1,8 @@
+{
+  "appId": "com.videoblitzer.recorder",
+  "productName": "VideoBlitzer Recorder",
+  "directories": { "output": "release" },
+  "files": ["dist/**/*", "package.json"],
+  "mac": { "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }], "artifactName": "VideoBlitzer-Recorder-mac.${ext}" },
+  "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "artifactName": "VideoBlitzer-Recorder-win.${ext}" }
+}

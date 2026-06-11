@@ -35,7 +35,7 @@ export function DashboardClient() {
       {data.profile.isOwner && <OwnerModeBadge />}
       <h1>VideoBlitzer dashboard</h1>
       <p className="muted">Signed in as {data.profile.email}. Server-side access is enforced by the API before any project, job, or storage data is returned.</p>
-      <div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><button className="button secondary">Download Desktop Recorder</button></div>
+      <div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><a className="button secondary" href="/desktop-recorder">Download Desktop Recorder</a></div>
       <CreditBadge credits={data.creditBalance} />
     </section>
     <br />
