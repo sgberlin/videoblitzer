@@ -6,6 +6,7 @@ create table if not exists allowed_users (
   role text not null default 'member' check (role in ('owner','admin','member')),
   plan_key text not null default 'starter_weekly',
   is_unlimited boolean not null default false,
+  status text not null default 'active' check (status in ('active','suspended','pending')),
   is_suspended boolean not null default false,
   invited_at timestamptz not null default now(),
   invited_by uuid,

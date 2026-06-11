@@ -16,7 +16,7 @@ adminRouter.get("/users", async (_req, res) => {
 adminRouter.post("/users", async (req, res) => {
   const body = z.object({ email: z.string().email(), role: z.enum(["owner", "admin", "member"]).default("member"), planKey: z.string().default("starter_weekly"), isUnlimited: z.boolean().default(false) }).parse(req.body);
   const supabase = createServiceClient();
-  if (supabase) await supabase.from("allowed_users").upsert({ email: body.email.toLowerCase(), role: body.role, plan_key: body.planKey, is_unlimited: body.isUnlimited });
+  if (supabase) await supabase.from("allowed_users").upsert({ email: body.email.trim().toLowerCase(), role: body.role, plan_key: body.planKey, is_unlimited: body.isUnlimited, status: "active" });
   return res.status(201).json({ ok: true });
 });
 

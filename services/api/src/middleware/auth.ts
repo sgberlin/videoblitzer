@@ -10,19 +10,37 @@ declare global {
   }
 }
 
+interface AuthDiagnostics {
+  authenticated: boolean;
+  email_present: boolean;
+  normalized_email_present: boolean;
+  allowed_user_found: boolean;
+  allowed_user_status?: string;
+  reason: string;
+}
+
+function normalizeEmail(email?: string | null) {
+  return email?.trim().toLowerCase() ?? "";
+}
+
+function authError(status: number, message: string, diagnostics: AuthDiagnostics) {
+  return { status, body: { error: message, ...diagnostics } };
+}
+
 export async function requireAuth(req: Request, res: Response, next: NextFunction) {
   const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token) return res.status(401).json({ error: "Missing login token. Please sign in again." });
-  if (!hasSupabaseAuthConfig()) return res.status(503).json({ error: "API Supabase auth is not configured. Check SUPABASE_URL and Supabase key env vars on the VPS." });
+  if (!token) return res.status(401).json(authError(401, "Missing login token. Please sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_bearer_token" }).body);
+  if (!hasSupabaseAuthConfig()) return res.status(503).json(authError(503, "API Supabase auth is not configured. Check SUPABASE_URL and Supabase key env vars on the VPS.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_supabase_auth_config" }).body);
 
   const authUser = await verifyBearerToken(token);
-  if (!authUser?.email) return res.status(401).json({ error: "Login session could not be verified. Please open the latest magic link or sign in again." });
+  if (!authUser) return res.status(401).json(authError(401, "Login session could not be verified. Please open the latest magic link or sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "jwt_verification_failed" }).body);
+  const normalizedEmail = normalizeEmail(authUser.email);
+  if (!normalizedEmail) return res.status(401).json(authError(401, "Login session did not include an email address. Please sign in again.", { authenticated: true, email_present: Boolean(authUser.email), normalized_email_present: false, allowed_user_found: false, reason: "missing_authenticated_email" }).body);
 
-  const access = await resolveAccess(authUser.id, authUser.email);
-  if (!access.allowed) return res.status(403).json({ error: "Private beta access required" });
-  if (access.isSuspended) return res.status(403).json({ error: "Account suspended" });
+  const access = await resolveAccess(authUser.id, normalizedEmail);
+  if (!access.allowed) return res.status(403).json(authError(403, "Private beta access required", access.diagnostics).body);
 
-  req.user = { id: authUser.id, email: authUser.email, role: access.role, isUnlimited: access.isUnlimited, planKey: access.planKey };
+  req.user = { id: authUser.id, email: normalizedEmail, role: access.role, isUnlimited: access.isUnlimited, planKey: access.planKey };
   return next();
 }
 
@@ -32,21 +50,37 @@ export function requireOwner(req: Request, res: Response, next: NextFunction) {
 }
 
 export async function resolveAccess(userId: string, email: string) {
-  const normalizedEmail = email.toLowerCase();
-  if (normalizedEmail === config.OWNER_EMAIL.toLowerCase()) {
-    return { allowed: true, isSuspended: false, role: "owner", planKey: "owner_unlimited", isUnlimited: true };
-  }
+  const normalizedEmail = normalizeEmail(email);
+  const baseDiagnostics = {
+    authenticated: true,
+    email_present: Boolean(email),
+    normalized_email_present: Boolean(normalizedEmail),
+    allowed_user_found: false,
+  };
 
   const supabase = createServiceClient();
   if (!supabase) {
-    return { allowed: false, isSuspended: false, role: "member", planKey: "starter_weekly", isUnlimited: false };
+    return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "missing_supabase_service_config" } };
   }
 
-  const { data } = await supabase.from("allowed_users").select("role, plan_key, is_unlimited, is_suspended").eq("email", normalizedEmail).maybeSingle();
-  if (!data) return { allowed: false, isSuspended: false, role: "member", planKey: "starter_weekly", isUnlimited: false };
+  const { data, error } = await supabase.from("allowed_users").select("email, role, plan_key, is_unlimited, status").eq("email", normalizedEmail).maybeSingle();
+  if (error) {
+    return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "allowed_user_lookup_failed" } };
+  }
+  if (!data) return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "allowed_user_not_found" } };
 
-  await supabase.from("profiles").upsert({ id: userId, email: normalizedEmail, role: data.role, plan_key: data.plan_key, is_unlimited: data.is_unlimited });
-  await supabase.from("credit_balances").upsert({ user_id: userId, is_unlimited: data.is_unlimited });
+  const status = String(data.status ?? "").trim().toLowerCase();
+  const rowDiagnostics = { ...baseDiagnostics, allowed_user_found: true, allowed_user_status: status || "missing" };
+  if (status !== "active") return { allowed: false, role: data.role ?? "member", planKey: data.plan_key ?? "starter_weekly", isUnlimited: false, diagnostics: { ...rowDiagnostics, reason: "allowed_user_not_active" } };
 
-  return { allowed: true, isSuspended: data.is_suspended, role: data.role, planKey: data.plan_key, isUnlimited: data.is_unlimited };
+  const isOwnerEmail = normalizedEmail === normalizeEmail(config.OWNER_EMAIL);
+  const isOwnerRow = data.role === "owner" && data.is_unlimited === true && data.plan_key === "owner_unlimited";
+  const role = isOwnerEmail && isOwnerRow ? "owner" : data.role;
+  const planKey = isOwnerEmail && isOwnerRow ? "owner_unlimited" : data.plan_key;
+  const isUnlimited = isOwnerEmail && isOwnerRow ? true : Boolean(data.is_unlimited);
+
+  await supabase.from("profiles").upsert({ id: userId, email: normalizedEmail, role, plan_key: planKey, is_unlimited: isUnlimited });
+  await supabase.from("credit_balances").upsert({ user_id: userId, is_unlimited: isUnlimited });
+
+  return { allowed: true, role, planKey, isUnlimited, diagnostics: { ...rowDiagnostics, reason: "allowed" } };
 }

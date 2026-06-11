@@ -11,6 +11,6 @@ on conflict (key) do update set
   is_public = excluded.is_public,
   is_unlimited = excluded.is_unlimited;
 
-insert into allowed_users (email, role, plan_key, is_unlimited, notes)
-values ('gizlenweb@gmail.com', 'owner', 'owner_unlimited', true, 'VideoBlitzer owner account')
-on conflict (email) do update set role = 'owner', plan_key = 'owner_unlimited', is_unlimited = true, is_suspended = false;
+insert into allowed_users (email, role, plan_key, is_unlimited, status, notes)
+values ('gizlenweb@gmail.com', 'owner', 'owner_unlimited', true, 'active', 'VideoBlitzer owner account')
+on conflict (email) do update set role = 'owner', plan_key = 'owner_unlimited', is_unlimited = true, status = 'active', is_suspended = false;

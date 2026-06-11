@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useMemo, useState } from "react";
+import { appConfig } from "../../lib/config";
 import { createBrowserSupabaseClient } from "../../lib/supabase";
 
 const NORMAL_COOLDOWN_MS = 60_000;
-const RATE_LIMIT_COOLDOWN_MS = 60 * 60_000;
+const RATE_LIMIT_COOLDOWN_MS = 5 * 60_000;
 const OTP_COOLDOWN_STORAGE_KEY = "videoblitzer:lastOtpRequestAt";
 const OTP_COOLDOWN_UNTIL_STORAGE_KEY = "videoblitzer:otpCooldownUntil";
 
@@ -20,6 +21,14 @@ function readStoredCooldown() {
   const explicitCooldownUntil = Number(window.localStorage.getItem(OTP_COOLDOWN_UNTIL_STORAGE_KEY) ?? "0");
   const lastRequestAt = Number(window.localStorage.getItem(OTP_COOLDOWN_STORAGE_KEY) ?? "0");
   return Math.max(explicitCooldownUntil, lastRequestAt ? lastRequestAt + NORMAL_COOLDOWN_MS : 0);
+}
+
+function supabaseProjectRef() {
+  try {
+    return new URL(appConfig.supabaseUrl).hostname.split(".")[0];
+  } catch {
+    return "";
+  }
 }
 
 export default function LoginPage() {
@@ -87,7 +96,25 @@ export default function LoginPage() {
       setMessage(error.message);
       return;
     }
-    setMessage("Magic code sent. Check your inbox and continue to the dashboard after verification.");
+    setMessage("Magic code sent. Check your email.");
   }
-  return <section className="hero"><span className="pill">Private beta</span><h1>Sign in to VideoBlitzer</h1><p className="muted">Only allowlisted emails can access the app. All access checks are confirmed server-side after Supabase email OTP login.</p><input className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" disabled={pending} /><br /><br /><button className="button" onClick={sendOtp} disabled={buttonDisabled}>{buttonText}</button>{isCoolingDown && <p className="muted">You can request another code in {formatCountdown(remainingMs)}.</p>}<p className="muted">{message}</p></section>;
+
+  function clearLoginState() {
+    const projectRef = supabaseProjectRef();
+    const allowedKeys = new Set([
+      OTP_COOLDOWN_STORAGE_KEY,
+      OTP_COOLDOWN_UNTIL_STORAGE_KEY,
+      ...(projectRef ? [`sb-${projectRef}-auth-token`, `sb-${projectRef}-auth-token-code-verifier`] : []),
+    ]);
+
+    for (const key of Object.keys(window.localStorage)) {
+      if (key.startsWith("videoblitzer:") || allowedKeys.has(key)) {
+        window.localStorage.removeItem(key);
+      }
+    }
+
+    window.location.reload();
+  }
+
+  return <section className="hero"><span className="pill">Private beta</span><h1>Sign in to VideoBlitzer</h1><p className="muted">Only allowlisted emails can access the app. All access checks are confirmed server-side after Supabase email OTP login.</p><input className="input" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" disabled={pending} /><br /><br /><button className="button" onClick={sendOtp} disabled={buttonDisabled}>{buttonText}</button>{isCoolingDown && <p className="muted">You can request another code in {formatCountdown(remainingMs)}.</p>}<p className="muted">{message}</p><button className="link-button" type="button" onClick={clearLoginState}>Clear login state</button></section>;
 }
