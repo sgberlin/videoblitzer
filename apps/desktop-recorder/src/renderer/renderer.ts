@@ -1,4 +1,4 @@
-import type { RecorderSettings, RecorderSource, SaveRecordingResult } from "../types";
+import type { RecorderSettings, RecorderSource, SaveRecordingResult, RecordingManifest, RecordingChunkRecord } from "../types";
 
 const preferredMimes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_000 } as const;
@@ -14,8 +14,14 @@ let lastBlob: Blob | null = null;
 let savedFile: SaveRecordingResult | null = null;
 let selectedMime = "video/webm";
 let selectedMode = "sports";
-let sourceFilter: "screen" | "window" = "screen";
-let markers: Array<{ time: string; label: string; note: string }> = [];
+let sourceFilter: "screen" | "window" | "browser" = "screen";
+let markers: Array<{ time: string; label: string; note: string; seconds?: number; createdAt?: string }> = [];
+let activeManifest: RecordingManifest | null = null;
+let chunkIndex = 0;
+let appVersion = "0.1.0";
+let platformLabel = "unknown";
+let combineVideoPath = "";
+let combineAudioPath = "";
 interface MatchEvent { id: string; minute: number; stoppageMinute?: number; period: string; team?: string; player?: string; assistingPlayer?: string; eventType: string; description: string; source: string; confidence: string; importanceScore: number; ignored?: boolean; }
 type HighlightLength = "5" | "15" | "25";
 interface HighlightSegment { order: number; title: string; targetSeconds: number; matchMinute: string; sourceTimestamp: string; reason: string; voiceoverPrompt: string; captionIdea: string; }
@@ -28,7 +34,7 @@ let renderedHighlightPackages: HighlightPackage[] = [];
 const suggestedEventIds = new Set<string>();
 let micMeterInterval: number | undefined;
 let paused = false;
-let settings: RecorderSettings = { apiUrl: "https://api.videoblitzer.com", rememberToken: false, quality: "standard", includeMicrophone: false };
+let settings: RecorderSettings = { apiUrl: "https://api.videoblitzer.com", rememberToken: false, quality: "standard", includeMicrophone: false, includeSystemAudio: false };
 
 function el<T extends HTMLElement>(id: string) { return document.getElementById(id) as T; }
 function setText(id: string, text: string) { el(id).textContent = text; }
@@ -41,7 +47,18 @@ function timestamp() {
 }
 function extensionForMime(mime: string) { return mime.startsWith("video/mp4") ? "mp4" : "webm"; }
 function contentTypeForMime(mime: string) { return mime.startsWith("video/mp4") ? "video/mp4" : "video/webm"; }
-function filenameForMime(mime: string) { return `videoblitzer-recording-${timestamp()}.${extensionForMime(mime)}`; }
+function slug(value: string) { return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "VideoBlitzer"; }
+function filenameForMime(mime: string) {
+  const stamp = timestamp().slice(0, 16);
+  if (selectedMode === "match") {
+    const teamA = el<HTMLInputElement>("teamA").value.trim();
+    const teamB = el<HTMLInputElement>("teamB").value.trim();
+    const base = teamA && teamB ? `${slug(teamA)}_vs_${slug(teamB)}` : "VideoBlitzer_Match";
+    return `${base}_${stamp}.${extensionForMime(mime)}`;
+  }
+  if (selectedMode === "browser") return `VideoBlitzer_BrowserRecording_${stamp}.${extensionForMime(mime)}`;
+  return `VideoBlitzer_Recording_${stamp}.${extensionForMime(mime)}`;
+}
 function selectedToken() { return (el<HTMLTextAreaElement>("accessToken").value || "").trim(); }
 function apiUrl() { return (el<HTMLInputElement>("apiUrl").value || "https://api.videoblitzer.com").replace(/\/$/, ""); }
 function headers(token: string) { return { "Content-Type": "application/json", Authorization: `Bearer ${token}` }; }
@@ -107,7 +124,10 @@ async function loadSettings() {
   el<HTMLTextAreaElement>("accessToken").value = settings.token ?? "";
   el<HTMLInputElement>("rememberToken").checked = settings.rememberToken;
   el<HTMLInputElement>("includeMic").checked = settings.includeMicrophone;
+  el<HTMLInputElement>("systemAudioToggle").checked = Boolean(settings.includeSystemAudio);
   el<HTMLSelectElement>("quality").value = settings.quality;
+  if (settings.selectedMicDeviceId) el<HTMLSelectElement>("micSelect").value = settings.selectedMicDeviceId;
+  updateAudioStatus();
   if (settings.outputFolder) setText("outputFolder", settings.outputFolder);
 }
 
@@ -119,6 +139,9 @@ async function saveSettings() {
     token: selectedToken(),
     quality: el<HTMLSelectElement>("quality").value as RecorderSettings["quality"],
     includeMicrophone: el<HTMLInputElement>("includeMic").checked,
+    includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked,
+    selectedMicDeviceId: el<HTMLSelectElement>("micSelect").value || undefined,
+    autoUpload: false,
   };
   await window.videoBlitzerRecorder.saveSettings(settings);
   await checkApi();
@@ -129,7 +152,7 @@ async function refreshSources() {
   sources = await window.videoBlitzerRecorder.getSources();
   const list = el<HTMLDivElement>("sources");
   list.innerHTML = "";
-  const visibleSources = sources.filter((source) => source.id.startsWith(sourceFilter));
+  const visibleSources = sources.filter((source) => sourceFilter === "browser" ? source.kind === "browser" : source.id.startsWith(sourceFilter));
   for (const source of visibleSources) {
     const card = document.createElement("button");
     card.type = "button";
@@ -138,7 +161,7 @@ async function refreshSources() {
     card.addEventListener("click", () => selectSource(source));
     list.appendChild(card);
   }
-  if (!visibleSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "screen" ? "screens" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
+  if (!visibleSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "screen" ? "screens" : sourceFilter === "browser" ? "browser windows" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
   const onlySource = visibleSources[0];
   if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
   setStatus(visibleSources.length ? "Source selected" : "Idle");
@@ -158,7 +181,7 @@ function selectSource(source: RecorderSource) {
 async function buildStream() {
   if (!selectedSource) throw new Error("Select a screen or window before recording.");
   const videoConstraints = {
-    audio: false,
+    audio: el<HTMLInputElement>("systemAudioToggle").checked ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: selectedSource.id } } : false,
     video: {
       mandatory: {
         chromeMediaSource: "desktop",
@@ -178,17 +201,26 @@ async function buildStream() {
   const tracks = [...displayStream.getVideoTracks(), ...displayStream.getAudioTracks()];
   if (el<HTMLInputElement>("includeMic").checked) {
     try {
-      const mic = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      const deviceId = el<HTMLSelectElement>("micSelect").value;
+      const mic = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
       tracks.push(...mic.getAudioTracks());
     } catch {
       setText("uploadStatus", "Microphone permission failed. Continuing with screen video only.");
     }
   }
-  return new MediaStream(tracks);
+  const finalStream = new MediaStream(tracks);
+  const hasAudio = finalStream.getAudioTracks().length > 0;
+  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? (displayStream.getAudioTracks().length ? "System audio: detected" : "System audio: not detected") : "System audio: off");
+  setText("audioStatus", hasAudio ? "Audio detected" : "No audio detected");
+  if (!hasAudio) setText("micWarning", "No audio was detected. Enable microphone, choose a supported source audio capture, or continue video-only.");
+  if (el<HTMLInputElement>("systemAudioToggle").checked && !displayStream.getAudioTracks().length && el<HTMLInputElement>("includeMic").checked) setText("micWarning", "Only microphone audio detected. System audio may be unavailable for this source or OS.");
+  return finalStream;
 }
 
 async function startRecording() {
   try {
+    if (!el<HTMLInputElement>("permissionConfirm").checked) throw new Error("Confirm that you are authorized to record this content before starting.");
+    if (!settings.outputFolder) throw new Error("Choose and save an output folder before recording so local files are recoverable.");
     await saveSettings();
     stream = await buildStream();
     const preview = el<HTMLVideoElement>("preview");
@@ -197,13 +229,16 @@ async function startRecording() {
     recordingPreview.srcObject = stream;
     el("preview").parentElement?.classList.add("has-video");
     chunks = [];
+    chunkIndex = 0;
+    activeManifest = createManifest();
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
     lastBlob = null;
     savedFile = null;
     const quality = el<HTMLSelectElement>("quality").value as keyof typeof qualityBitrates;
     recorder = new MediaRecorder(stream, { mimeType: selectedMime, videoBitsPerSecond: qualityBitrates[quality], audioBitsPerSecond: 128_000 });
-    recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    recorder.ondataavailable = (event) => { if (event.data.size) { chunks.push(event.data); void saveChunk(event.data); } };
     recorder.onstop = () => void finishRecording();
-    recorder.start(1000);
+    recorder.start(30_000);
     markers = [];
     renderMarkers();
     startedAt = Date.now();
@@ -240,6 +275,7 @@ async function finishRecording() {
   const fileName = filenameForMime(selectedMime);
   const buffer = await blob.arrayBuffer();
   savedFile = await window.videoBlitzerRecorder.saveRecording(buffer, fileName, settings.outputFolder);
+  if (activeManifest) { activeManifest.completedAt = new Date().toISOString(); activeManifest.finalFilePath = savedFile.filePath; activeManifest.durationEstimateSeconds = Math.floor((Date.now() - startedAt) / 1000); activeManifest.markers = markers; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
   setText("savedPath", savedFile.filePath);
   setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
   setText("audioStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone requested" : "Video only / source audio if available");
@@ -275,8 +311,9 @@ async function uploadRecording() {
     await saveSettings();
     updateUploadProgress(0);
     setText("uploadStatus", "Creating desktop recorder project...");
-    const title = `Desktop recording ${timestamp()}`;
-    const created = await api<{ project: { id: string; title: string } }>("/projects", { method: "POST", body: JSON.stringify({ title, source_type: "desktop_recorder" }) });
+    const metadata = collectMetadata();
+    const title = metadata.matchMetadata.matchTitle || (selectedMode === "match" ? `${metadata.matchMetadata.teamA || "Team A"} vs ${metadata.matchMetadata.teamB || "Team B"}` : `Browser recording ${timestamp()}`);
+    const created = await api<{ project: { id: string; title: string } }>("/projects", { method: "POST", body: JSON.stringify({ title, source_type: "desktop_recorder", recording_mode: selectedMode, source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, source_metadata: { sourceLabel: selectedSource?.name, sourcePlatform: metadata.matchMetadata.sourcePlatform } }) });
     setText("projectId", created.project.id);
 
     const filename = savedFile.filePath.split(/[\\/]/).pop() ?? filenameForMime(selectedMime);
@@ -291,14 +328,16 @@ async function uploadRecording() {
     setText("objectKey", objectKey);
 
     setText("uploadStatus", "Saving video record and queuing MP4 export...");
-    const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: "video/webm", size_bytes: savedFile.sizeBytes, raw_format: "webm", desired_export_format: "mp4" }) });
+    const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: "video/webm", size_bytes: savedFile.sizeBytes, raw_format: "webm", desired_export_format: "mp4", recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: "video/webm", duration_seconds: activeManifest?.durationEstimateSeconds }) });
     if (!completed.conversion_job) {
       await api("/exports/convert", { method: "POST", body: JSON.stringify({ project_id: created.project.id, video_id: completed.video.id, source_object_key: objectKey, source_format: "webm", target_format: "mp4" }) });
     }
+    if (activeManifest) { activeManifest.uploadStatus = "uploaded"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
     setText("uploadStatus", "Uploaded. MP4 conversion is queued for backend FFmpeg processing.");
     el("projectLink").innerHTML = `<a href="https://app.videoblitzer.com/projects/${created.project.id}/overview">Open project in web app</a>`;
     setStatus("Uploaded");
   } catch (error) {
+    if (activeManifest) { activeManifest.uploadStatus = "failed"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setStatus("Upload failed");
     setText("uploadStatus", error instanceof Error ? error.message : "Upload failed.");
   }
@@ -550,10 +589,156 @@ function renderIntelligenceOutputs() {
   output.innerHTML = `${baseOutputs}${packages ? `<div class="output-block"><strong>Generated highlight/edit plans</strong></div>${packages}` : ""}`;
 }
 
+function collectMetadata() {
+  const permissionConfirmed = el<HTMLInputElement>("permissionConfirm").checked;
+  const matchMetadata = {
+    matchTitle: el<HTMLInputElement>("matchTitle").value.trim(),
+    gameType: el<HTMLInputElement>("gameType").value.trim(),
+    teamA: el<HTMLInputElement>("teamA").value.trim(),
+    teamB: el<HTMLInputElement>("teamB").value.trim(),
+    competition: el<HTMLInputElement>("competition").value.trim(),
+    sourcePlatform: el<HTMLInputElement>("sourcePlatform").value.trim(),
+    sourceUrl: el<HTMLInputElement>("sourceUrl").value.trim(),
+    matchDate: el<HTMLInputElement>("matchDate").value,
+    notes: el<HTMLTextAreaElement>("sessionNotes").value.trim(),
+  };
+  return {
+    matchMetadata,
+    permission: { permissionConfirmed, confirmedAt: permissionConfirmed ? new Date().toISOString() : undefined, sourceLabel: selectedSource?.name, appVersion, recordingMode: selectedMode },
+    recordingMetadata: { mode: selectedMode, sourceLabel: selectedSource?.name, appVersion, platform: platformLabel, audioSettings: audioSettings(), sentenceAwareEditing: { preserveCompleteSentences: true, handlesSeconds: [1, 3], manualOverride: el<HTMLInputElement>("manualCutOverride").checked } },
+  };
+}
+
+function audioSettings() {
+  return { includeMicrophone: el<HTMLInputElement>("includeMic").checked, includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked, microphoneDeviceId: el<HTMLSelectElement>("micSelect").value || "default" };
+}
+
+function createManifest(): RecordingManifest {
+  const metadata = collectMetadata();
+  return { sessionId: crypto.randomUUID(), mode: selectedMode, sourceLabel: selectedSource?.name, createdAt: new Date().toISOString(), chunks: [], audioSettings: audioSettings(), markers: [], metadata, uploadStatus: "local_only", outputFolder: settings.outputFolder };
+}
+
+async function saveChunk(blob: Blob) {
+  if (!activeManifest) return;
+  const index = ++chunkIndex;
+  try {
+    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeManifest.sessionId}_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: 30 });
+    activeManifest.chunks.push(chunk);
+    activeManifest.markers = markers;
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+  } catch (error) {
+    setText("uploadStatus", error instanceof Error ? `Chunk write failed: ${error.message}. Stop recording and check disk permissions.` : "Chunk write failed. Stop recording and check disk permissions.");
+  }
+}
+
+async function populateMicrophones() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const select = el<HTMLSelectElement>("micSelect");
+    const current = select.value;
+    select.innerHTML = `<option value="">Default microphone</option>`;
+    for (const device of devices.filter((item) => item.kind === "audioinput")) {
+      const option = document.createElement("option");
+      option.value = device.deviceId;
+      option.textContent = device.label || `Microphone ${select.length}`;
+      select.appendChild(option);
+    }
+    select.value = settings.selectedMicDeviceId ?? current;
+  } catch {
+    setText("micWarning", "Microphone devices could not be listed. Grant microphone permission and try again.");
+  }
+}
+
+function updateAudioStatus() {
+  setText("micStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone: on" : "Microphone: off");
+  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? "System audio: requested" : "System audio: off");
+}
+
+function updatePermissionStatus() {
+  const ok = el<HTMLInputElement>("permissionConfirm").checked;
+  setText("permissionStatus", ok ? "Permission confirmed" : "Permission required");
+  el("permissionStatus").classList.toggle("success", ok);
+  el("permissionStatus").classList.toggle("warning", !ok);
+}
+
+async function renderRecoveries() {
+  const list = el("recoveryList");
+  const sessions = await window.videoBlitzerRecorder.listRecoverableSessions().catch(() => []);
+  if (!sessions.length) { list.textContent = "No unfinished sessions found yet."; return; }
+  list.innerHTML = "";
+  for (const session of sessions) {
+    const node = document.createElement("div");
+    node.className = "timeline-item";
+    node.innerHTML = `<strong>${session.mode} · ${session.createdAt}</strong><br><span>${session.sourceLabel ?? "Unknown source"} · ${session.chunks.length} chunks</span><br><button class="ghost-button">Recover recording</button>`;
+    node.querySelector("button")?.addEventListener("click", async () => {
+      try {
+        const recovered = await window.videoBlitzerRecorder.recoverSession(session, settings.outputFolder);
+        savedFile = recovered;
+        setText("savedPath", recovered.filePath);
+        setText("uploadStatus", "Recovered recording locally. Review and upload when ready.");
+        el<HTMLButtonElement>("uploadRecording").disabled = false;
+      } catch (error) { setText("uploadStatus", error instanceof Error ? error.message : "Could not recover recording."); }
+    });
+    list.appendChild(node);
+  }
+}
+
+async function createQuickClip(durationSeconds: number) {
+  if (!savedFile) { setText("uploadStatus", "Save a local recording before creating clips."); return; }
+  try {
+    const marker = markers[markers.length - 1];
+    const start = Math.max(0, (marker?.seconds ?? 0) - 3);
+    const name = `${slug(el<HTMLInputElement>("teamA").value || "VideoBlitzer")}_${slug(marker?.label ?? "Clip")}_${formatHms(start).replace(/:/g, "-")}_${durationSeconds}s.mp4`;
+    const clip = await window.videoBlitzerRecorder.createClip({ sourcePath: savedFile.filePath, outputFolder: settings.outputFolder, filename: name, startSeconds: start, durationSeconds, exactCut: el<HTMLInputElement>("manualCutOverride").checked });
+    setText("uploadStatus", `Clip saved locally: ${clip.filePath}`);
+  } catch (error) { setText("uploadStatus", error instanceof Error ? `Clip creation failed: ${error.message}` : "Clip creation failed."); }
+}
+
+async function createClipAroundMarker() { await createQuickClip(30); }
+
+async function selectCombineFile(kind: "video" | "audio") {
+  const file = await window.videoBlitzerRecorder.selectMediaFile(kind);
+  if (!file) return;
+  const meta = await window.videoBlitzerRecorder.mediaMetadata(file);
+  if (kind === "video") { combineVideoPath = file; setText("combineVideoPath", `${file} · duration ${meta.durationSeconds?.toFixed(1) ?? "unknown"}s`); }
+  else { combineAudioPath = file; setText("combineAudioPath", `${file} · duration ${meta.durationSeconds?.toFixed(1) ?? "unknown"}s`); }
+}
+
+async function combineMedia() {
+  try {
+    if (!combineVideoPath || !combineAudioPath) throw new Error("Select both a video file and an audio file.");
+    const offset = Number(el<HTMLInputElement>("audioOffset").value);
+    if (!Number.isFinite(offset)) throw new Error("Audio offset must be a valid number.");
+    const output = await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: combineVideoPath, audioPath: combineAudioPath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Combined_${timestamp()}.mp4`, offsetSeconds: offset, trimToShortest: el<HTMLInputElement>("trimShortest").checked });
+    savedFile = output;
+    setText("savedPath", output.filePath);
+    setText("combineStatus", `Combined MP4 saved: ${output.filePath}`);
+    el<HTMLButtonElement>("uploadRecording").disabled = false;
+  } catch (error) { setText("combineStatus", error instanceof Error ? error.message : "Failed to combine video and audio."); }
+}
+
+async function fetchImportMetadata() {
+  try {
+    const sourceUrl = el<HTMLInputElement>("importSourceUrl").value.trim();
+    if (!sourceUrl) throw new Error("Enter a source URL.");
+    const response = await api<{ metadata: unknown }>("/source-import/metadata", { method: "POST", body: JSON.stringify({ sourceUrl, permissionConfirmed: el<HTMLInputElement>("importPermissionConfirm").checked }) });
+    el("importMetadataOutput").textContent = JSON.stringify(response.metadata, null, 2);
+  } catch (error) { el("importMetadataOutput").textContent = error instanceof Error ? error.message : "Could not fetch source metadata."; }
+}
+
+async function auditSourceImport() {
+  try {
+    const response = await api<{ audit: unknown }>("/source-import/audit", { method: "POST", body: JSON.stringify({ sourceUrl: el<HTMLInputElement>("importSourceUrl").value.trim(), importMethod: el<HTMLSelectElement>("importMethod").value, permissionConfirmed: el<HTMLInputElement>("importPermissionConfirm").checked, metadata: { source: "desktop_recorder" } }) });
+    el("importMetadataOutput").textContent = JSON.stringify(response.audit, null, 2);
+  } catch (error) { el("importMetadataOutput").textContent = error instanceof Error ? error.message : "Could not store import audit."; }
+}
+
 function markerSet() {
   const universal = ["Clip This", "Important", "Question", "Mistake"];
   const byMode: Record<string, string[]> = {
-    sports: ["Goal", "Chance", "Foul", "Tactical Point", "Player Note", "Replay Point"],
+    match: ["Goal", "Save", "Foul", "Key Moment", "Start", "End", "Custom Note"],
+    sports: ["Goal", "Save", "Foul", "Key Moment", "Start", "End", "Custom Note"],
+    browser: ["Clip This", "Key Moment", "Start", "End", "Custom Note"],
     business: ["Feature", "Customer Pain", "Objection", "Pricing", "CTA"],
     training: ["Step", "Warning", "Example", "Recap"],
     screen: ["Feature", "Question", "CTA"],
@@ -565,7 +750,9 @@ function markerSet() {
 
 function addMarker(label: string, noteOverride?: string, timeOverride?: string) {
   const note = noteOverride ?? el<HTMLInputElement>("noteInput").value.trim();
-  markers.push({ time: timeOverride ?? el("timer").textContent ?? "00:00", label, note });
+  const seconds = startedAt ? Math.floor((Date.now() - startedAt) / 1000) : undefined;
+  markers.push({ time: timeOverride ?? el("timer").textContent ?? "00:00", label, note, seconds, createdAt: new Date().toISOString() });
+  if (activeManifest) { activeManifest.markers = markers; void window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
   el<HTMLInputElement>("noteInput").value = "";
   renderMarkers();
 }
@@ -624,9 +811,22 @@ function setupPremiumInteractions() {
   }));
   document.querySelectorAll(".mode-card").forEach((card) => card.addEventListener("click", () => selectMode((card as HTMLElement).dataset.mode ?? "sports")));
   el("screenTab").addEventListener("click", () => { sourceFilter = "screen"; el("screenTab").classList.add("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
-  el("windowTab").addEventListener("click", () => { sourceFilter = "window"; el("windowTab").classList.add("active"); el("screenTab").classList.remove("active"); void refreshSources(); });
+  el("windowTab").addEventListener("click", () => { sourceFilter = "window"; el("windowTab").classList.add("active"); el("screenTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
+  el("browserTab").addEventListener("click", () => { sourceFilter = "browser"; el("browserTab").classList.add("active"); el("screenTab").classList.remove("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
   el("pauseRecording").addEventListener("click", pauseOrResume);
   el("testMic").addEventListener("click", () => { startMicMeter(); window.setTimeout(stopMicMeter, 1800); setText("micWarning", "Mic test complete. If the meter moved, input is available."); });
+  el("refreshRecovery").addEventListener("click", () => void renderRecoveries());
+  el("clip15").addEventListener("click", () => void createQuickClip(15));
+  el("clip30").addEventListener("click", () => void createQuickClip(30));
+  el("clip60").addEventListener("click", () => void createQuickClip(60));
+  el("clipMarker").addEventListener("click", () => void createClipAroundMarker());
+  el("selectCombineVideo").addEventListener("click", () => void selectCombineFile("video"));
+  el("selectCombineAudio").addEventListener("click", () => void selectCombineFile("audio"));
+  el("combineMedia").addEventListener("click", () => void combineMedia());
+  el("fetchImportMetadata").addEventListener("click", () => void fetchImportMetadata());
+  el("auditSourceImport").addEventListener("click", () => void auditSourceImport());
+  ["includeMic", "systemAudioToggle", "micSelect"].forEach((id) => el(id).addEventListener("change", () => { updateAudioStatus(); void saveSettings(); }));
+  el("permissionConfirm").addEventListener("change", updatePermissionStatus);
   el("fetchMatchTimeline").addEventListener("click", () => void fetchMatchTimeline());
   el("addManualEvent").addEventListener("click", addManualMatchEvent);
   el("alignMatchClock").addEventListener("click", alignMatchClock);
@@ -639,6 +839,8 @@ function setupPremiumInteractions() {
 }
 
 async function init() {
+  appVersion = await window.videoBlitzerRecorder.getAppVersion();
+  platformLabel = await window.videoBlitzerRecorder.getPlatform();
   configureMimeOptions();
   await loadSettings();
   await checkApi();
@@ -651,7 +853,10 @@ async function init() {
   ["apiUrl", "accessToken", "rememberToken", "includeMic", "quality"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
   setupPremiumInteractions();
   renderMarkerButtons();
+  await populateMicrophones();
   void refreshSources();
+  void renderRecoveries();
+  updatePermissionStatus();
 }
 
 void init();
