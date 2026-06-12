@@ -25,7 +25,13 @@ app.use(cors({
     return callback(new Error("Origin not allowed by VideoBlitzer API CORS policy"));
   },
   credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Authorization", "Content-Type"],
 }));
+app.use((req, res, next) => {
+  if (req.method !== "OPTIONS") return next();
+  return res.sendStatus(204);
+});
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "videoblitzer-api", product: config.APP_NAME }));
@@ -49,5 +55,11 @@ app.use((error: unknown, _req: express.Request, res: express.Response, _next: ex
 });
 
 app.listen(config.PORT, () => {
+  console.info("[startup] env", {
+    hasSupabaseUrl: Boolean(process.env.SUPABASE_URL),
+    hasSupabaseSecretKey: Boolean(process.env.SUPABASE_SECRET_KEY),
+    hasSupabaseServiceRoleKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+    ownerEmail: process.env.OWNER_EMAIL || "gizlenweb@gmail.com",
+  });
   console.log(`VideoBlitzer API listening on ${config.PORT}`);
 });

@@ -2,6 +2,8 @@
 
 These steps replace the old test `server.js` process with the real compiled `services/api` app at `/var/www/videoblitzer-api`.
 
+`https://api.videoblitzer.com` is served by this Hostinger VPS deployment through Nginx and PM2. It is not the same deployment target as the Vercel web app. API secrets must be added to `/var/www/videoblitzer-api/.env` on the VPS; adding them only to Vercel will not affect `api.videoblitzer.com`.
+
 ## 1. Build From Repo Root
 
 Run this from the repository root before deploying:
@@ -72,6 +74,9 @@ API_URL=https://api.videoblitzer.com
 OWNER_EMAIL=gizlenweb@gmail.com
 SUPABASE_URL=...
 SUPABASE_SECRET_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
+# Optional guard: production Supabase project ref from SUPABASE_URL.
+SUPABASE_PROJECT_REF=...
 R2_BUCKET_NAME=videoblitzer-videos
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
@@ -79,7 +84,7 @@ R2_ENDPOINT=...
 PORT=8080
 ```
 
-R2 credentials must stay only on the VPS/API server. Do not add R2 credentials to Vercel or frontend environment variables.
+Required Supabase API runtime values for production are `SUPABASE_URL` for the VideoBlitzer production project and either `SUPABASE_SECRET_KEY` or `SUPABASE_SERVICE_ROLE_KEY` for the same project. `OWNER_EMAIL` should be `gizlenweb@gmail.com` unless intentionally changed. R2 credentials must stay only on the VPS/API server. Do not add R2 credentials to Vercel or frontend environment variables.
 
 ## 4. Install And Build On VPS
 

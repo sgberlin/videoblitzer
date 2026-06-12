@@ -17,6 +17,10 @@ dashboardRouter.get("/", async (req, res) => {
     isOwner: req.user!.role === "owner",
   };
   const emptyDashboard = async () => ({
+    projects: [],
+    uploads: [],
+    recordings: [],
+    message: "No projects yet",
     profile,
     creditBalance: req.user!.isUnlimited ? "Unlimited" : 0,
     recentProjects: [],
@@ -48,6 +52,10 @@ dashboardRouter.get("/", async (req, res) => {
 
   console.info("[dashboard] response", { statusCode: 200, mode: "loaded", userEmail: req.user!.email });
   return res.json({
+    projects: projects.data ?? [],
+    uploads: [],
+    recordings: [],
+    message: (projects.data ?? []).length ? "Dashboard loaded" : "No projects yet",
     profile,
     creditBalance: req.user!.isUnlimited || balance.data?.is_unlimited ? "Unlimited" : balance.data?.balance ?? 0,
     recentProjects: projects.data ?? [],
