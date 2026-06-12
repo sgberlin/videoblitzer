@@ -2,8 +2,9 @@
 import { useEffect, useState } from "react";
 import { OwnerModeBadge, CreditBadge } from "../../components/Badges";
 import { AuthStatusMessage } from "../../components/AuthStatus";
-import { apiFetch } from "../../lib/api";
+import { appConfig } from "../../lib/config";
 import { authDebug, type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../lib/auth";
+import { createBrowserSupabaseClient } from "../../lib/supabase";
 import type { DashboardData } from "../../lib/types";
 
 function formatBytes(bytes: number) {
@@ -13,9 +14,45 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+type DashboardDiagnostics = {
+  hasSession: boolean;
+  hasAccessToken: boolean;
+  userEmail: string;
+  apiUrl: string;
+  dashboardStatus: number | null;
+  dashboardErrorCode: string;
+  dashboardErrorMessage: string;
+  sentAuthorizationHeader: boolean;
+};
+
+async function readDashboardError(response: Response) {
+  try {
+    const parsed = await response.json() as { error?: string; reason?: string; code?: string };
+    return {
+      code: parsed.reason ?? parsed.code ?? `http_${response.status}`,
+      message: parsed.error ?? `Dashboard request failed with status ${response.status}.`,
+    };
+  } catch {
+    return {
+      code: `http_${response.status}`,
+      message: `Dashboard request failed with status ${response.status}.`,
+    };
+  }
+}
+
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState("");
+  const [diagnostics, setDiagnostics] = useState<DashboardDiagnostics>({
+    hasSession: false,
+    hasAccessToken: false,
+    userEmail: "",
+    apiUrl: appConfig.apiUrl,
+    dashboardStatus: null,
+    dashboardErrorCode: "",
+    dashboardErrorMessage: "",
+    sentAuthorizationHeader: false,
+  });
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const [loading, setLoading] = useState(true);
   const auth = useAuthSession();
@@ -29,7 +66,56 @@ export function DashboardClient() {
 
     setLoading(true);
     setAuthStatus("authenticated");
-    apiFetch<DashboardData>("/dashboard", {}, auth.session?.access_token)
+    async function loadDashboard() {
+      const supabase = createBrowserSupabaseClient();
+      if (!supabase) throw new Error("Supabase publishable configuration is required before dashboard can load.");
+
+      const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+      if (sessionError) throw sessionError;
+      const session = sessionData.session;
+      const token = session?.access_token;
+      const userEmail = session?.user.email?.trim().toLowerCase() ?? "";
+      const nextDiagnostics: DashboardDiagnostics = {
+        hasSession: Boolean(session),
+        hasAccessToken: Boolean(token),
+        userEmail,
+        apiUrl: appConfig.apiUrl,
+        dashboardStatus: null,
+        dashboardErrorCode: "",
+        dashboardErrorMessage: "",
+        sentAuthorizationHeader: Boolean(token),
+      };
+      setDiagnostics(nextDiagnostics);
+
+      if (!token) {
+        throw new Error("No Supabase access token found. Please sign in again.");
+      }
+
+      authDebug("dashboard request", {
+        hasSession: nextDiagnostics.hasSession,
+        hasAccessToken: nextDiagnostics.hasAccessToken,
+        userEmail,
+        apiUrl: appConfig.apiUrl,
+        sentAuthorizationHeader: true,
+      });
+
+      const response = await fetch(`${appConfig.apiUrl}/dashboard`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+
+      if (!response.ok) {
+        const dashboardError = await readDashboardError(response);
+        setDiagnostics({ ...nextDiagnostics, dashboardStatus: response.status, dashboardErrorCode: dashboardError.code, dashboardErrorMessage: dashboardError.message });
+        throw new Error(dashboardError.message);
+      }
+
+      setDiagnostics({ ...nextDiagnostics, dashboardStatus: response.status });
+      return response.json() as Promise<DashboardData>;
+    }
+
+    loadDashboard()
       .then((response) => {
         authDebug("allowlist result", { allowed: true, userEmail: response.profile.email, currentRoute: "/dashboard" });
         setData(response);
@@ -47,7 +133,7 @@ export function DashboardClient() {
   if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;
   if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
   if (error) {
-    return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><p className="muted">The API is reachable, but the dashboard data could not be loaded.</p><a className="button" href="/login">Back to login</a></section>;
+    return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><p className="muted">The API is reachable, but the dashboard data could not be loaded.</p><div className="card"><h3>Temporary auth diagnostics</h3><pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(diagnostics, null, 2)}</pre></div><a className="button" href="/login">Back to login</a></section>;
   }
   if (!data) return null;
 
