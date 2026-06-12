@@ -16,17 +16,19 @@ dashboardRouter.get("/", async (req, res) => {
     isUnlimited: req.user!.isUnlimited,
     isOwner: req.user!.role === "owner",
   };
+  const emptyDashboard = async () => ({
+    profile,
+    creditBalance: req.user!.isUnlimited ? "Unlimited" : 0,
+    recentProjects: [],
+    pendingJobs: [],
+    failedJobs: [],
+    usageEvents: [],
+    storage: await readR2Usage(),
+  });
 
   if (!supabase) {
-    return res.json({
-      profile,
-      creditBalance: req.user!.isUnlimited ? "Unlimited" : 0,
-      recentProjects: [],
-      pendingJobs: [],
-      failedJobs: [],
-      usageEvents: [],
-      storage: await readR2Usage(),
-    });
+    console.info("[dashboard] response", { statusCode: 200, mode: "empty_no_supabase_service", userEmail: req.user!.email });
+    return res.json(await emptyDashboard());
   }
 
   const [projects, pendingJobs, failedJobs, usageEvents, balance, storage] = await Promise.all([
@@ -39,8 +41,12 @@ dashboardRouter.get("/", async (req, res) => {
   ]);
 
   const error = projects.error ?? pendingJobs.error ?? failedJobs.error ?? usageEvents.error ?? balance.error;
-  if (error) return res.status(500).json({ error: error.message });
+  if (error) {
+    console.warn("[dashboard] data query failed, returning empty dashboard", { statusCode: 200, errorCode: error.code ?? "dashboard_query_failed", userEmail: req.user!.email });
+    return res.json(await emptyDashboard());
+  }
 
+  console.info("[dashboard] response", { statusCode: 200, mode: "loaded", userEmail: req.user!.email });
   return res.json({
     profile,
     creditBalance: req.user!.isUnlimited || balance.data?.is_unlimited ? "Unlimited" : balance.data?.balance ?? 0,

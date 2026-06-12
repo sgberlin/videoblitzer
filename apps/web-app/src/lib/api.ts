@@ -1,6 +1,6 @@
 import { appConfig } from "./config";
 import { createBrowserSupabaseClient } from "./supabase";
-import { clearStaleAuthErrors, resolveSupabaseSession } from "./auth";
+import { authDebug, clearStaleAuthErrors, resolveSupabaseSession } from "./auth";
 
 function friendlyApiError(body: string, fallback: string) {
   try {
@@ -22,6 +22,7 @@ export async function getAccessToken() {
 }
 
 export async function apiFetch<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
+  authDebug("api request", { path, hasAuthorizationHeader: Boolean(token), apiUrl: appConfig.apiUrl });
   const response = await fetch(`${appConfig.apiUrl}${path}`, {
     ...init,
     headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}), ...init.headers },

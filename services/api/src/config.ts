@@ -14,6 +14,7 @@ const envSchema = z.object({
   SUPABASE_ANON_KEY: z.string().optional(),
   SUPABASE_SECRET_KEY: z.string().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
+  SUPABASE_PROJECT_REF: z.string().optional(),
   R2_ACCOUNT_ID: z.string().optional(),
   R2_BUCKET_NAME: z.string().default("videoblitzer-videos"),
   R2_ACCESS_KEY_ID: z.string().optional(),

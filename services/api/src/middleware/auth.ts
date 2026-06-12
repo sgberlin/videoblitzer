@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import { config } from "../config";
-import { createServiceClient, hasSupabaseAuthConfig, verifyBearerToken } from "../supabase";
+import { createServiceClient, hasExpectedSupabaseProjectRef, hasSupabaseAuthConfig, supabaseProjectRef, verifyBearerToken } from "../supabase";
 
 declare global {
   namespace Express {
@@ -27,17 +27,39 @@ function authError(status: number, message: string, diagnostics: AuthDiagnostics
   return { status, body: { error: message, ...diagnostics } };
 }
 
-export async function requireAuth(req: Request, res: Response, next: NextFunction) {
-  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
-  if (!token) return res.status(401).json(authError(401, "Missing login token. Please sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_bearer_token" }).body);
-  if (!hasSupabaseAuthConfig()) return res.status(503).json(authError(503, "API Supabase auth is not configured. Check SUPABASE_URL and Supabase key env vars on the VPS.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_supabase_auth_config" }).body);
+function authLog(message: string, details: Record<string, unknown>) {
+  console.info(`[auth] ${message}`, details);
+}
 
-  const authUser = await verifyBearerToken(token);
-  if (!authUser) return res.status(401).json(authError(401, "Login session could not be verified. Please open the latest magic link or sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "jwt_verification_failed" }).body);
+export async function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const hasAuthorizationHeader = Boolean(req.headers.authorization);
+  const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
+  const projectRef = supabaseProjectRef();
+  authLog("request received", { path: req.originalUrl, method: req.method, hasAuthorizationHeader, supabaseProjectRef: projectRef, expectedSupabaseProject: hasExpectedSupabaseProjectRef() });
+  if (!token) {
+    authLog("request denied", { path: req.originalUrl, statusCode: 401, errorCode: "missing_bearer_token", hasAuthorizationHeader });
+    return res.status(401).json(authError(401, "Missing login token. Please sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_bearer_token" }).body);
+  }
+  if (!hasSupabaseAuthConfig()) {
+    authLog("request denied", { path: req.originalUrl, statusCode: 503, errorCode: "missing_supabase_auth_config", hasAuthorizationHeader });
+    return res.status(503).json(authError(503, "API Supabase auth is not configured. Check SUPABASE_URL and Supabase key env vars on the VPS.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "missing_supabase_auth_config" }).body);
+  }
+  if (!hasExpectedSupabaseProjectRef()) {
+    authLog("request denied", { path: req.originalUrl, statusCode: 503, errorCode: "supabase_project_ref_mismatch", supabaseProjectRef: projectRef });
+    return res.status(503).json(authError(503, "API Supabase auth points at the wrong project. Check SUPABASE_URL on the VPS.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: "supabase_project_ref_mismatch" }).body);
+  }
+
+  const { user: authUser, errorCode } = await verifyBearerToken(token);
+  authLog("token verification result", { path: req.originalUrl, success: Boolean(authUser), errorCode, decodedUserEmail: authUser?.email ?? null });
+  if (!authUser) return res.status(401).json(authError(401, "Login session could not be verified. Please open the latest magic link or sign in again.", { authenticated: false, email_present: false, normalized_email_present: false, allowed_user_found: false, reason: errorCode ?? "jwt_verification_failed" }).body);
   const normalizedEmail = normalizeEmail(authUser.email);
-  if (!normalizedEmail) return res.status(401).json(authError(401, "Login session did not include an email address. Please sign in again.", { authenticated: true, email_present: Boolean(authUser.email), normalized_email_present: false, allowed_user_found: false, reason: "missing_authenticated_email" }).body);
+  if (!normalizedEmail) {
+    authLog("request denied", { path: req.originalUrl, statusCode: 401, errorCode: "missing_authenticated_email", decodedUserEmail: authUser.email ?? null });
+    return res.status(401).json(authError(401, "Login session did not include an email address. Please sign in again.", { authenticated: true, email_present: Boolean(authUser.email), normalized_email_present: false, allowed_user_found: false, reason: "missing_authenticated_email" }).body);
+  }
 
   const access = await resolveAccess(authUser.id, normalizedEmail);
+  authLog("allowlist result", { path: req.originalUrl, allowed: access.allowed, decodedUserEmail: normalizedEmail, role: access.role, isUnlimited: access.isUnlimited, reason: access.diagnostics.reason, allowedUserFound: access.diagnostics.allowed_user_found });
   if (!access.allowed) return res.status(403).json(authError(403, "Private beta access required", access.diagnostics).body);
 
   req.user = { id: authUser.id, email: normalizedEmail, role: access.role, isUnlimited: access.isUnlimited, planKey: access.planKey };
