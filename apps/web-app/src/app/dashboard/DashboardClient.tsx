@@ -1,7 +1,9 @@
 "use client";
 import { useEffect, useState } from "react";
 import { OwnerModeBadge, CreditBadge } from "../../components/Badges";
-import { authedApiFetch } from "../../lib/api";
+import { AuthStatusMessage } from "../../components/AuthStatus";
+import { apiFetch } from "../../lib/api";
+import { authDebug, type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../lib/auth";
 import type { DashboardData } from "../../lib/types";
 
 function formatBytes(bytes: number) {
@@ -14,19 +16,38 @@ function formatBytes(bytes: number) {
 export function DashboardClient() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [error, setError] = useState("");
+  const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const [loading, setLoading] = useState(true);
+  const auth = useAuthSession();
 
   useEffect(() => {
-    authedApiFetch<DashboardData>("/dashboard")
-      .then(setData)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+    if (auth.status !== "authenticated") {
+      setAuthStatus(auth.status);
+      setLoading(false);
+      return;
+    }
 
-  if (loading) return <section className="hero"><h1>Loading dashboard</h1><p className="muted">Checking private beta access and loading your workspace.</p></section>;
+    setLoading(true);
+    setAuthStatus("authenticated");
+    apiFetch<DashboardData>("/dashboard", {}, auth.session?.access_token)
+      .then((response) => {
+        authDebug("allowlist result", { allowed: true, userEmail: response.profile.email, currentRoute: "/dashboard" });
+        setData(response);
+        setError("");
+      })
+      .catch((err: Error) => {
+        authDebug("allowlist result", { allowed: false, userEmail: auth.email, error: err.message, currentRoute: "/dashboard" });
+        if (isPrivateBetaError(err.message)) setAuthStatus("unauthorized_email");
+        else if (isInvalidLinkError(err.message)) setAuthStatus("invalid_link");
+        else setError(err.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once or request a fresh magic link." : err.message);
+      })
+      .finally(() => setLoading(false));
+  }, [auth.email, auth.session?.access_token, auth.status]);
+
+  if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;
+  if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
   if (error) {
-    const isAuthError = error.toLowerCase().includes("session") || error.toLowerCase().includes("unauthorized") || error.toLowerCase().includes("sign in");
-    return <section className="hero"><h1>{isAuthError ? "Sign in required" : "Dashboard unavailable"}</h1><p className="warning">{error}</p><p className="muted">{isAuthError ? "Use the newest magic link from your email. If it has expired, request another code." : "The API is reachable, but the dashboard data could not be loaded."}</p><a className="button" href="/login">Back to login</a></section>;
+    return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><p className="muted">The API is reachable, but the dashboard data could not be loaded.</p><a className="button" href="/login">Back to login</a></section>;
   }
   if (!data) return null;
 

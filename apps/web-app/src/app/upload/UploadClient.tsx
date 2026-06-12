@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { authedApiFetch, getAccessToken } from "../../lib/api";
+import { AuthStatusMessage } from "../../components/AuthStatus";
+import { apiFetch } from "../../lib/api";
+import { authDebug, type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../lib/auth";
 import type { DashboardProject } from "../../lib/types";
 
 type CreatedProject = { project: { id: string; title: string; status: string } };
@@ -45,23 +47,43 @@ export function UploadClient() {
   const [status, setStatus] = useState("Choose a video file to start.");
   const [projectUrl, setProjectUrl] = useState("");
   const [busy, setBusy] = useState(false);
+  const [authStatus, setAuthStatus] = useState<AuthState>("loading");
+  const auth = useAuthSession();
 
   useEffect(() => {
-    authedApiFetch<{ projects: DashboardProject[] }>("/projects")
-      .then((response) => setProjects(response.projects))
-      .catch(() => setStatus("Sign in to load existing projects, or create a new project during upload."));
-  }, []);
+    if (auth.status !== "authenticated") {
+      setAuthStatus(auth.status);
+      return;
+    }
+
+    apiFetch<{ projects: DashboardProject[] }>("/projects", {}, auth.session?.access_token)
+      .then((response) => {
+        setProjects(response.projects);
+        setAuthStatus("authenticated");
+        authDebug("allowlist result", { allowed: true, userEmail: auth.email, currentRoute: "/upload" });
+      })
+      .catch((error: Error) => {
+        authDebug("allowlist result", { allowed: false, userEmail: auth.email, error: error.message, currentRoute: "/upload" });
+        if (isPrivateBetaError(error.message)) setAuthStatus("unauthorized_email");
+        else if (isInvalidLinkError(error.message)) setAuthStatus("invalid_link");
+        else {
+          setAuthStatus("authenticated");
+          setStatus(error.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once." : "Sign in to load existing projects, or create a new project during upload.");
+        }
+      });
+  }, [auth.email, auth.session?.access_token, auth.status]);
 
   async function resolveProject(fileToUpload: File) {
+    if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
     if (selectedProjectId !== "new") {
       const existing = projects.find((project) => project.id === selectedProjectId);
       return { project: { id: selectedProjectId, title: existing?.title ?? "Selected project", status: existing?.status ?? "draft" } } satisfies CreatedProject;
     }
 
-    return authedApiFetch<CreatedProject>("/projects", {
+    return apiFetch<CreatedProject>("/projects", {
       method: "POST",
       body: JSON.stringify({ title: title || fileToUpload.name.replace(/\.[^.]+$/, "") }),
-    });
+    }, auth.session.access_token);
   }
 
   async function startUpload() {
@@ -71,31 +93,31 @@ export function UploadClient() {
     setProjectUrl("");
 
     try {
-      await getAccessToken();
+      if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
       setStatus(selectedProjectId === "new" ? "Creating project..." : "Preparing selected project...");
       const created = await resolveProject(file);
       const contentType = contentTypeFor(file);
 
       setStatus("Requesting signed R2 upload URL...");
-      const signed = await authedApiFetch<SignedUpload>("/uploads/create-signed-url", {
+      const signed = await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType }),
-      });
+      }, auth.session.access_token);
 
       setStatus("Uploading directly to Cloudflare R2...");
       await uploadToSignedUrl(file, signed, setProgress);
 
       setStatus("Saving video record...");
-      const completed = await authedApiFetch<CompletedUpload>("/uploads/complete", {
+      const completed = await apiFetch<CompletedUpload>("/uploads/complete", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
-      });
+      }, auth.session.access_token);
 
       setStatus("Creating initial analyze job...");
-      const job = await authedApiFetch<CreatedJob>("/jobs/analyze", {
+      const job = await apiFetch<CreatedJob>("/jobs/analyze", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, videoId: completed.video.id }),
-      });
+      }, auth.session.access_token);
 
       setStatus(`Upload complete. ${file.name} is saved and analyze job ${job.job.id} is ${job.job.status}.`);
       setProjectUrl(`/projects/${created.project.id}/overview`);
@@ -105,6 +127,9 @@ export function UploadClient() {
       setBusy(false);
     }
   }
+
+  if (auth.status === "loading" || authStatus === "loading") return <AuthStatusMessage status="loading" />;
+  if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
 
   return <section className="hero">
     <h1>Upload Existing Video</h1>

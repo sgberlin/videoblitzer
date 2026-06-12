@@ -1,9 +1,11 @@
 "use client";
 import { useEffect, useState } from "react";
 import { FormatSelector, OutputFormatCards, ReadinessChecklist, TimelineClipCard, CopyBlock } from "../../../components/Cards";
+import { AuthStatusMessage } from "../../../components/AuthStatus";
 import { StatsEditor } from "../../../components/StatsEditor";
 import { ThumbnailPreview } from "../../../components/ThumbnailPreview";
-import { authedApiFetch } from "../../../lib/api";
+import { apiFetch } from "../../../lib/api";
+import { authDebug, type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../../lib/auth";
 import type { ProjectDetail } from "../../../lib/types";
 
 type WorkspaceTab = "overview" | "timeline" | "match-data" | "highlights" | "captions" | "commentary" | "thumbnail" | "social-pack" | "exports" | "debug";
@@ -17,16 +19,36 @@ function EmptyState({ label }: { label: string }) { return <p className="muted">
 export function ProjectWorkspaceClient({ projectId, tab }: { projectId: string; tab: WorkspaceTab }) {
   const [data, setData] = useState<ProjectDetail | null>(null);
   const [error, setError] = useState("");
+  const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const [loading, setLoading] = useState(true);
+  const auth = useAuthSession();
 
   useEffect(() => {
-    authedApiFetch<ProjectDetail>(`/projects/${projectId}`)
-      .then(setData)
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, [projectId]);
+    if (auth.status !== "authenticated") {
+      setAuthStatus(auth.status);
+      setLoading(false);
+      return;
+    }
 
-  if (loading) return <section className="card"><h2>Loading project workspace</h2><p className="muted">Fetching project records from the API.</p></section>;
+    setAuthStatus("authenticated");
+    setLoading(true);
+    apiFetch<ProjectDetail>(`/projects/${projectId}`, {}, auth.session?.access_token)
+      .then((response) => {
+        setData(response);
+        setError("");
+        authDebug("allowlist result", { allowed: true, userEmail: auth.email, currentRoute: `/projects/${projectId}` });
+      })
+      .catch((err: Error) => {
+        authDebug("allowlist result", { allowed: false, userEmail: auth.email, error: err.message, currentRoute: `/projects/${projectId}` });
+        if (isPrivateBetaError(err.message)) setAuthStatus("unauthorized_email");
+        else if (isInvalidLinkError(err.message)) setAuthStatus("invalid_link");
+        else setError(err.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once." : err.message);
+      })
+      .finally(() => setLoading(false));
+  }, [auth.email, auth.session?.access_token, auth.status, projectId]);
+
+  if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;
+  if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
   if (error) return <section className="card"><h2>Project unavailable</h2><p className="warning">{error}</p></section>;
   if (!data) return null;
 

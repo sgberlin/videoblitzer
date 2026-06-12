@@ -1,6 +1,8 @@
 "use client";
 import { useEffect, useState } from "react";
-import { authedApiFetch } from "../../../lib/api";
+import { AuthStatusMessage } from "../../../components/AuthStatus";
+import { apiFetch } from "../../../lib/api";
+import { authDebug, type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../../lib/auth";
 import type { R2Usage } from "../../../lib/types";
 
 function formatBytes(bytes: number) {
@@ -13,16 +15,36 @@ function formatBytes(bytes: number) {
 export function StorageMetadataClient() {
   const [metadata, setMetadata] = useState<R2Usage | null>(null);
   const [error, setError] = useState("");
+  const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const [loading, setLoading] = useState(true);
+  const auth = useAuthSession();
 
   useEffect(() => {
-    authedApiFetch<{ metadata: R2Usage }>("/storage/metadata")
-      .then((response) => setMetadata(response.metadata))
-      .catch((err: Error) => setError(err.message))
-      .finally(() => setLoading(false));
-  }, []);
+    if (auth.status !== "authenticated") {
+      setAuthStatus(auth.status);
+      setLoading(false);
+      return;
+    }
 
-  if (loading) return <section className="card"><h1>R2 Storage</h1><p className="muted">Loading bucket metadata from the API.</p></section>;
+    setAuthStatus("authenticated");
+    setLoading(true);
+    apiFetch<{ metadata: R2Usage }>("/storage/metadata", {}, auth.session?.access_token)
+      .then((response) => {
+        setMetadata(response.metadata);
+        setError("");
+        authDebug("allowlist result", { allowed: true, userEmail: auth.email, currentRoute: "/admin/storage" });
+      })
+      .catch((err: Error) => {
+        authDebug("allowlist result", { allowed: false, userEmail: auth.email, error: err.message, currentRoute: "/admin/storage" });
+        if (isPrivateBetaError(err.message)) setAuthStatus("unauthorized_email");
+        else if (isInvalidLinkError(err.message)) setAuthStatus("invalid_link");
+        else setError(err.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once." : err.message);
+      })
+      .finally(() => setLoading(false));
+  }, [auth.email, auth.session?.access_token, auth.status]);
+
+  if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;
+  if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
   if (error) return <section className="card"><h1>R2 Storage</h1><p className="warning">{error}</p></section>;
   if (!metadata) return null;
 

@@ -63,21 +63,32 @@ export async function resolveAccess(userId: string, email: string) {
     return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "missing_supabase_service_config" } };
   }
 
+  const isOwnerEmail = normalizedEmail === normalizeEmail(config.OWNER_EMAIL);
   const { data, error } = await supabase.from("allowed_users").select("email, role, plan_key, is_unlimited, status").eq("email", normalizedEmail).maybeSingle();
   if (error) {
     return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "allowed_user_lookup_failed" } };
+  }
+  if (!data && isOwnerEmail) {
+    await supabase.from("allowed_users").upsert({ email: normalizedEmail, role: "owner", plan_key: "owner_unlimited", is_unlimited: true, status: "active" });
+    await supabase.from("profiles").upsert({ id: userId, email: normalizedEmail, role: "owner", plan_key: "owner_unlimited", is_unlimited: true });
+    await supabase.from("credit_balances").upsert({ user_id: userId, is_unlimited: true });
+    return { allowed: true, role: "owner", planKey: "owner_unlimited", isUnlimited: true, diagnostics: { ...baseDiagnostics, allowed_user_found: true, allowed_user_status: "active", reason: "owner_auto_allowed" } };
   }
   if (!data) return { allowed: false, role: "member", planKey: "starter_weekly", isUnlimited: false, diagnostics: { ...baseDiagnostics, reason: "allowed_user_not_found" } };
 
   const status = String(data.status ?? "").trim().toLowerCase();
   const rowDiagnostics = { ...baseDiagnostics, allowed_user_found: true, allowed_user_status: status || "missing" };
+  if (status !== "active" && isOwnerEmail) {
+    await supabase.from("allowed_users").upsert({ email: normalizedEmail, role: "owner", plan_key: "owner_unlimited", is_unlimited: true, status: "active" });
+    await supabase.from("profiles").upsert({ id: userId, email: normalizedEmail, role: "owner", plan_key: "owner_unlimited", is_unlimited: true });
+    await supabase.from("credit_balances").upsert({ user_id: userId, is_unlimited: true });
+    return { allowed: true, role: "owner", planKey: "owner_unlimited", isUnlimited: true, diagnostics: { ...rowDiagnostics, allowed_user_status: "active", reason: "owner_reactivated" } };
+  }
   if (status !== "active") return { allowed: false, role: data.role ?? "member", planKey: data.plan_key ?? "starter_weekly", isUnlimited: false, diagnostics: { ...rowDiagnostics, reason: "allowed_user_not_active" } };
 
-  const isOwnerEmail = normalizedEmail === normalizeEmail(config.OWNER_EMAIL);
-  const isOwnerRow = data.role === "owner" && data.is_unlimited === true && data.plan_key === "owner_unlimited";
-  const role = isOwnerEmail && isOwnerRow ? "owner" : data.role;
-  const planKey = isOwnerEmail && isOwnerRow ? "owner_unlimited" : data.plan_key;
-  const isUnlimited = isOwnerEmail && isOwnerRow ? true : Boolean(data.is_unlimited);
+  const role = isOwnerEmail ? "owner" : data.role;
+  const planKey = isOwnerEmail ? "owner_unlimited" : data.plan_key;
+  const isUnlimited = isOwnerEmail ? true : Boolean(data.is_unlimited);
 
   await supabase.from("profiles").upsert({ id: userId, email: normalizedEmail, role, plan_key: planKey, is_unlimited: isUnlimited });
   await supabase.from("credit_balances").upsert({ user_id: userId, is_unlimited: isUnlimited });
