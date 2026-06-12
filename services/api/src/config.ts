@@ -21,6 +21,8 @@ const envSchema = z.object({
   R2_ENDPOINT: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4.1-mini"),
+  API_FOOTBALL_KEY: z.string().optional(),
+  SPORTRADAR_API_KEY: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   PORT: z.coerce.number().default(8080),
