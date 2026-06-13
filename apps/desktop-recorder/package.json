@@ -14,7 +14,10 @@
     "package:mac": "npm run build && electron-builder --mac dmg --x64 --arm64 --config electron-builder.json",
     "package:win": "npm run build && electron-builder --win nsis --x64 --config electron-builder.json"
   },
-  "dependencies": {},
+  "dependencies": {
+    "ffmpeg-static": "^5.3.0",
+    "ffprobe-static": "^3.1.0"
+  },
   "devDependencies": {
     "electron": "^30.5.1",
     "electron-builder": "^24.13.3",

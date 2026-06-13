@@ -1,8 +1,10 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, shell } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell } from "electron";
 import { copyFile, mkdir, readFile, readdir, stat, statfs, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import path from "node:path";
 import { spawn } from "node:child_process";
+import ffmpegStatic from "ffmpeg-static";
+import ffprobeStatic from "ffprobe-static";
 import type { ClipInput, CombineVideoAudioInput, RecorderSettings, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingInput } from "./types";
 
 const defaultSettings: RecorderSettings = {
@@ -22,6 +24,8 @@ function validateFilename(filename: string) { return filename.replace(/[^a-zA-Z0
 function sessionDir(sessionId: string, outputFolder?: string) { return path.join(outputFolder || sessionsRoot(), sessionId); }
 const allowedPaths = new Set<string>();
 const allowedFolders = new Set<string>();
+const ffmpegPath = ffmpegStatic || "ffmpeg";
+const ffprobePath = ffprobeStatic.path || "ffprobe";
 
 function rememberPath(filePath: string) {
   allowedPaths.add(path.resolve(filePath));
@@ -34,7 +38,17 @@ function rememberFolder(folderPath: string) {
 
 function isAllowedPath(filePath: string) {
   const resolved = path.resolve(filePath);
-  return allowedPaths.has(resolved) || [...allowedFolders].some((folder) => resolved.startsWith(`${folder}${path.sep}`));
+  return allowedPaths.has(resolved) || [...allowedFolders].some((folder) => {
+    const root = path.resolve(folder);
+    const relative = path.relative(root, resolved);
+    return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+  });
+}
+
+function ensureAllowedFolder(folderPath: string) {
+  const resolved = path.resolve(folderPath);
+  if (!isAllowedPath(resolved)) throw new Error("Output folder must be selected in VideoBlitzer Screen Recorder before it can be used.");
+  return resolved;
 }
 
 async function uniqueFilePath(outputFolder: string, filename: string) {
@@ -64,14 +78,23 @@ function validateSessionId(sessionId: string) {
 async function readSettings(): Promise<RecorderSettings> {
   try {
     const raw = JSON.parse(await readFile(userConfigPath(), "utf8")) as RecorderSettings;
-    return { ...defaultSettings, ...raw, token: raw.rememberToken ? raw.token : undefined };
+    for (const root of raw.outputRoots ?? []) rememberFolder(root);
+    if (raw.outputFolder) rememberFolder(raw.outputFolder);
+    let token: string | undefined;
+    if (raw.rememberToken && raw.tokenEncrypted && safeStorage.isEncryptionAvailable()) {
+      token = safeStorage.decryptString(Buffer.from(raw.tokenEncrypted, "base64"));
+    }
+    return { ...defaultSettings, ...raw, token, tokenEncrypted: undefined };
   } catch {
     return defaultSettings;
   }
 }
 
 async function writeSettings(settings: RecorderSettings) {
-  const safeSettings = { ...settings, token: settings.rememberToken ? settings.token : undefined };
+  const roots = Array.from(new Set([...(settings.outputRoots ?? []), settings.outputFolder].filter(Boolean) as string[]));
+  roots.forEach(rememberFolder);
+  const tokenEncrypted = settings.rememberToken && settings.token && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(settings.token).toString("base64") : undefined;
+  const safeSettings = { ...settings, outputRoots: roots, token: undefined, tokenEncrypted };
   await mkdir(app.getPath("userData"), { recursive: true });
   await writeFile(userConfigPath(), JSON.stringify(safeSettings, null, 2));
   return { ok: true };
@@ -89,7 +112,7 @@ function runCommand(command: string, args: string[]) {
 
 async function ffprobeDuration(filePath: string) {
   return new Promise<number | null>((resolve) => {
-    const child = spawn("ffprobe", ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
     child.on("error", () => resolve(null));
@@ -102,6 +125,7 @@ async function ffprobeDuration(filePath: string) {
 
 async function saveManifest(input: SaveManifestInput) {
   validateSessionId(input.manifest.sessionId);
+  if (input.outputFolder) ensureAllowedFolder(input.outputFolder);
   const dir = sessionDir(input.manifest.sessionId, input.outputFolder);
   await mkdir(dir, { recursive: true });
   rememberFolder(dir);
@@ -114,7 +138,8 @@ async function readManifest(filePath: string) {
 }
 
 async function listRecoverableSessions() {
-  const roots = [sessionsRoot(), app.getPath("videos")];
+  const settings = await readSettings();
+  const roots = Array.from(new Set([sessionsRoot(), app.getPath("videos"), settings.outputFolder, ...(settings.outputRoots ?? [])].filter(Boolean) as string[]));
   const sessions: RecordingManifest[] = [];
   for (const root of roots) {
     if (!existsSync(root)) continue;
@@ -130,13 +155,22 @@ async function listRecoverableSessions() {
 
 async function recoverSession(manifest: RecordingManifest, outputFolder?: string) {
   if (!manifest.chunks.length) throw new Error("No chunks were found for this recording session.");
+  if (manifest.outputFolder) ensureAllowedFolder(manifest.outputFolder);
+  if (outputFolder) ensureAllowedFolder(outputFolder);
   const outputName = validateFilename(`${manifest.sessionId}_recovered.webm`);
   const outputPath = path.join(outputFolder || app.getPath("videos"), outputName);
   const listPath = path.join(sessionDir(manifest.sessionId, manifest.outputFolder), "concat.txt");
-  const chunkLines = manifest.chunks.filter((chunk) => existsSync(chunk.filePath)).map((chunk) => `file '${chunk.filePath.replace(/'/g, "'\\''")}'`).join("\n");
+  const readableChunks = manifest.chunks.filter((chunk) => existsSync(chunk.filePath) && isAllowedPath(chunk.filePath));
+  const chunkLines = readableChunks.map((chunk) => `file '${chunk.filePath.replace(/'/g, "'\\''")}'`).join("\n");
   if (!chunkLines) throw new Error("No readable chunks were found. Check that the output folder is still available.");
   await writeFile(listPath, chunkLines);
-  await runCommand("ffmpeg", ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]);
+  try {
+    await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c", "copy", outputPath]);
+    if (await ffprobeDuration(outputPath) === null) throw new Error("Recovered copy output failed validation.");
+  } catch {
+    await runCommand(ffmpegPath, ["-y", "-f", "concat", "-safe", "0", "-i", listPath, "-c:v", "libvpx-vp9", "-b:v", "2M", "-c:a", "libopus", outputPath]);
+    if (await ffprobeDuration(outputPath) === null) throw new Error("Recovered recording could not be validated after remux/re-encode.");
+  }
   rememberPath(outputPath);
   return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
 }
@@ -160,6 +194,8 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  rememberFolder(sessionsRoot());
+  rememberFolder(app.getPath("videos"));
   ipcMain.handle("get-app-version", () => app.getVersion());
   ipcMain.handle("get-platform", () => process.platform);
   ipcMain.handle("get-settings", readSettings);
@@ -192,6 +228,7 @@ app.whenReady().then(() => {
   ipcMain.handle("save-recording", async (_event, input: SaveRecordingInput) => {
     if (!input?.arrayBuffer || !input.filename) throw new Error("Recording data and filename are required.");
     const outputFolder = input.outputFolder || app.getPath("videos");
+    ensureAllowedFolder(outputFolder);
     if (!existsSync(outputFolder)) await mkdir(outputFolder, { recursive: true });
     rememberFolder(outputFolder);
     const buffer = Buffer.from(new Uint8Array(input.arrayBuffer));
@@ -203,6 +240,7 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("save-recording-chunk", async (_event, input: SaveChunkInput) => {
     validateSessionId(input.sessionId);
+    if (input.outputFolder) ensureAllowedFolder(input.outputFolder);
     const dir = sessionDir(input.sessionId, input.outputFolder);
     await mkdir(dir, { recursive: true });
     rememberFolder(dir);
@@ -216,17 +254,33 @@ app.whenReady().then(() => {
   ipcMain.handle("save-manifest", (_event, input: SaveManifestInput) => saveManifest(input));
   ipcMain.handle("list-recoverable-sessions", listRecoverableSessions);
   ipcMain.handle("recover-session", (_event, manifest: RecordingManifest, outputFolder?: string) => recoverSession(manifest, outputFolder));
-  ipcMain.handle("media-metadata", async (_event, filePath: string) => ({ durationSeconds: await ffprobeDuration(filePath) }));
+  ipcMain.handle("media-metadata", async (_event, filePath: string) => {
+    if (!filePath || !isAllowedPath(filePath)) throw new Error("File path is required and must be selected through VideoBlitzer Screen Recorder.");
+    return { durationSeconds: await ffprobeDuration(filePath) };
+  });
   ipcMain.handle("read-local-file", async (_event, filePath: string) => {
     if (!filePath || !existsSync(filePath) || !isAllowedPath(filePath)) throw new Error("Selected file does not exist or was not created by VideoBlitzer Screen Recorder.");
     const buffer = await readFile(filePath);
     const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     return { arrayBuffer, sizeBytes: buffer.byteLength };
   });
+  ipcMain.handle("upload-local-file", async (_event, input: { filePath: string; signedUrl: string; headers?: Record<string, string> }) => {
+    if (!input.filePath || !existsSync(input.filePath) || !isAllowedPath(input.filePath)) throw new Error("Selected file does not exist or is not trusted for upload.");
+    const response = await fetch(input.signedUrl, {
+      method: "PUT",
+      headers: input.headers ?? {},
+      body: createReadStream(input.filePath) as unknown as BodyInit,
+      // Node's fetch requires this when sending a stream body.
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+    if (!response.ok) throw new Error(`Upload to R2 failed with status ${response.status}.`);
+    return { ok: true };
+  });
   ipcMain.handle("create-clip", async (_event, input: ClipInput) => {
     if (!input.sourcePath || !existsSync(input.sourcePath) || !isAllowedPath(input.sourcePath)) throw new Error("Choose an existing source recording before creating a clip.");
     if (!Number.isFinite(input.startSeconds) || input.startSeconds < 0) throw new Error("Clip start must be a valid timestamp.");
     const outputFolder = input.outputFolder || path.dirname(input.sourcePath);
+    ensureAllowedFolder(outputFolder);
     await mkdir(outputFolder, { recursive: true });
     rememberFolder(outputFolder);
     const outputPath = await uniqueFilePath(outputFolder, input.filename);
@@ -234,7 +288,7 @@ app.whenReady().then(() => {
     const args = input.exactCut
       ? ["-y", "-i", input.sourcePath, "-ss", String(input.startSeconds), ...(duration ? ["-t", String(duration)] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-movflags", "+faststart", outputPath]
       : ["-y", "-ss", String(input.startSeconds), "-i", input.sourcePath, ...(duration ? ["-t", String(duration)] : []), "-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-c:a", "aac", "-movflags", "+faststart", outputPath];
-    await runCommand("ffmpeg", args);
+    await runCommand(ffmpegPath, args);
     rememberPath(outputPath);
     return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
   });
@@ -243,6 +297,7 @@ app.whenReady().then(() => {
     if (!input.audioPath || !existsSync(input.audioPath) || !isAllowedPath(input.audioPath)) throw new Error("Select a supported audio file.");
     if (!Number.isFinite(input.offsetSeconds)) throw new Error("Audio offset must be a valid number of seconds.");
     const outputFolder = input.outputFolder || path.dirname(input.videoPath);
+    ensureAllowedFolder(outputFolder);
     await mkdir(outputFolder, { recursive: true });
     rememberFolder(outputFolder);
     const outputPath = await uniqueFilePath(outputFolder, input.filename);
@@ -250,13 +305,14 @@ app.whenReady().then(() => {
     const args = input.offsetSeconds >= 0
       ? ["-y", "-i", input.videoPath, ...offsetArgs, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath]
       : ["-y", ...offsetArgs, "-i", input.videoPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath];
-    await runCommand("ffmpeg", args);
+    await runCommand(ffmpegPath, args);
     rememberPath(outputPath);
     return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
   });
   ipcMain.handle("copy-local-file", async (_event, sourcePath: string, outputFolder?: string) => {
     if (!existsSync(sourcePath) || !isAllowedPath(sourcePath)) throw new Error("Selected file does not exist or was not selected through VideoBlitzer Screen Recorder.");
     const destinationFolder = outputFolder || app.getPath("videos");
+    ensureAllowedFolder(destinationFolder);
     await mkdir(destinationFolder, { recursive: true });
     rememberFolder(destinationFolder);
     const destination = await uniqueFilePath(destinationFolder, path.basename(sourcePath));

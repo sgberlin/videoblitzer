@@ -14,6 +14,7 @@ declare global {
       selectMediaFile(kind: "video" | "audio" | "any"): Promise<string | undefined>;
       mediaMetadata(filePath: string): Promise<MediaMetadata>;
       readLocalFile(filePath: string): Promise<{ arrayBuffer: ArrayBuffer; sizeBytes: number }>;
+      uploadLocalFile(filePath: string, signedUrl: string, headers?: Record<string, string>): Promise<{ ok: true }>;
       createClip(input: ClipInput): Promise<SaveRecordingResult>;
       combineVideoAudio(input: CombineVideoAudioInput): Promise<SaveRecordingResult>;
       copyLocalFile(sourcePath: string, outputFolder?: string): Promise<SaveRecordingResult>;

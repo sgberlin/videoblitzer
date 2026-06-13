@@ -8,6 +8,7 @@ let selectedSource: RecorderSource | null = null;
 let stream: MediaStream | null = null;
 let recorder: MediaRecorder | null = null;
 let chunks: BlobPart[] = [];
+let chunkSaveChain: Promise<void> = Promise.resolve();
 let startedAt = 0;
 let timerInterval: number | undefined;
 let lastBlob: Blob | null = null;
@@ -271,6 +272,7 @@ async function startRecording() {
     recordingPreview.srcObject = stream;
     el("preview").parentElement?.classList.add("has-video");
     chunks = [];
+    chunkSaveChain = Promise.resolve();
     chunkIndex = 0;
     activeManifest = createManifest();
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
@@ -278,7 +280,9 @@ async function startRecording() {
     savedFile = null;
     const quality = el<HTMLSelectElement>("quality").value as keyof typeof qualityBitrates;
     recorder = new MediaRecorder(stream, { mimeType: selectedMime, videoBitsPerSecond: qualityBitrates[quality], audioBitsPerSecond: 128_000 });
-    recorder.ondataavailable = (event) => { if (event.data.size) { chunks.push(event.data); void saveChunk(event.data); } };
+    recorder.ondataavailable = (event) => {
+      if (event.data.size) chunkSaveChain = chunkSaveChain.then(() => saveChunk(event.data));
+    };
     recorder.onstop = () => void finishRecording();
     recorder.start(30_000);
     markers = [];
@@ -306,32 +310,41 @@ function stopRecording() {
 }
 
 async function finishRecording() {
-  window.clearInterval(timerInterval);
-  timerInterval = undefined;
-  stopMicMeter();
-  el("recBadge").classList.remove("active");
-  stream?.getTracks().forEach((track) => track.stop());
-  stream = null;
-  const blob = new Blob(chunks, { type: contentTypeForMime(selectedMime) });
-  lastBlob = blob;
-  const fileName = filenameForMime(selectedMime);
-  const buffer = await blob.arrayBuffer();
-  savedFile = await window.videoBlitzerRecorder.saveRecording(buffer, fileName, settings.outputFolder);
-  if (activeManifest) { activeManifest.completedAt = new Date().toISOString(); activeManifest.finalFilePath = savedFile.filePath; activeManifest.durationEstimateSeconds = Math.floor((Date.now() - startedAt) / 1000); activeManifest.markers = markers; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
-  setText("savedPath", savedFile.filePath);
-  setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
-  setText("audioStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone requested" : "Video only / source audio if available");
-  const playback = el<HTMLVideoElement>("playback");
-  playback.src = URL.createObjectURL(blob);
-  setStatus("Saved locally");
-  setText("uploadStatus", `Saved ${fileName} locally. Upload after recording when ready.`);
-  el<HTMLButtonElement>("openLocation").disabled = false;
-  el<HTMLButtonElement>("uploadRecording").disabled = false;
-  el<HTMLButtonElement>("exportMp4").disabled = false;
-  el<HTMLButtonElement>("generateTranscript").disabled = false;
-  el<HTMLButtonElement>("generateClips").disabled = false;
-  el<HTMLButtonElement>("generateCaptions").disabled = false;
-  el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+  try {
+    window.clearInterval(timerInterval);
+    timerInterval = undefined;
+    stopMicMeter();
+    el("recBadge").classList.remove("active");
+    stream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+    await chunkSaveChain;
+    const fileName = filenameForMime(selectedMime);
+    lastBlob = null;
+    if (!activeManifest) throw new Error("Recording manifest was not available for finalization.");
+    activeManifest.markers = markers;
+    activeManifest.durationEstimateSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+    savedFile = await window.videoBlitzerRecorder.recoverSession(activeManifest, settings.outputFolder);
+    activeManifest.completedAt = new Date().toISOString();
+    activeManifest.finalFilePath = savedFile.filePath;
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+    setText("savedPath", savedFile.filePath);
+    setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
+    setText("audioStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone requested" : "Video only / source audio if available");
+    setStatus("Saved locally");
+    setText("uploadStatus", `Saved ${fileName} locally. Upload after recording when ready.`);
+    el<HTMLButtonElement>("openLocation").disabled = false;
+    el<HTMLButtonElement>("uploadRecording").disabled = false;
+    el<HTMLButtonElement>("exportMp4").disabled = false;
+    el<HTMLButtonElement>("generateTranscript").disabled = false;
+    el<HTMLButtonElement>("generateClips").disabled = false;
+    el<HTMLButtonElement>("generateCaptions").disabled = false;
+    el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+  } catch (error) {
+    setStatus("Save failed");
+    setText("uploadStatus", error instanceof Error ? `Could not finalize recording: ${error.message}. Use crash recovery to recover saved chunks.` : "Could not finalize recording. Use crash recovery to recover saved chunks.");
+    el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+  }
 }
 
 function uploadToSignedUrl(blob: Blob, signedUrl: string, requiredHeaders: Record<string, string> | undefined, onProgress: (value: number) => void) {
@@ -366,7 +379,6 @@ async function uploadRecording() {
     const filename = savedFile.filePath.split(/[\\/]/).pop() ?? filenameForMime(selectedMime);
     const contentType = contentTypeForFilePath(savedFile.filePath);
     const rawFormat = rawFormatForContentType(contentType);
-    const uploadBlob = lastBlob ?? new Blob([(await window.videoBlitzerRecorder.readLocalFile(savedFile.filePath)).arrayBuffer], { type: contentType });
     setText("uploadStatus", "Requesting signed R2 upload URL...");
     const signed = await api<{ signedUrl?: string; uploadUrl?: string; objectKey?: string; key?: string; requiredHeaders?: Record<string, string> }>("/uploads/create-signed-url", { method: "POST", body: JSON.stringify({ projectId: created.project.id, filename, contentType }) });
     const signedUrl = signed.signedUrl ?? signed.uploadUrl;
@@ -374,7 +386,8 @@ async function uploadRecording() {
     if (!signedUrl || !objectKey) throw new Error("API did not return a signed upload URL.");
 
     setText("uploadStatus", `Uploading ${rawFormat.toUpperCase()} directly to Cloudflare R2...`);
-    await uploadToSignedUrl(uploadBlob, signedUrl, signed.requiredHeaders, updateUploadProgress);
+    if (lastBlob) await uploadToSignedUrl(lastBlob, signedUrl, signed.requiredHeaders, updateUploadProgress);
+    else { await window.videoBlitzerRecorder.uploadLocalFile(savedFile.filePath, signedUrl, signed.requiredHeaders); updateUploadProgress(100); }
     setText("objectKey", objectKey);
 
     setText("uploadStatus", "Saving video record and queuing backend work...");
@@ -641,6 +654,14 @@ function renderIntelligenceOutputs() {
 }
 
 function collectMetadata() {
+  if (activeManifest?.finalFilePath && activeManifest.metadata) {
+    const stored = activeManifest.metadata as { matchMetadata?: Record<string, string>; permission?: { permissionConfirmed?: boolean; confirmedAt?: string; sourceLabel?: string; recordingMode?: string }; recordingMetadata?: Record<string, unknown> };
+    return {
+      matchMetadata: stored.matchMetadata ?? {},
+      permission: stored.permission ?? { permissionConfirmed: el<HTMLInputElement>("permissionConfirm").checked, confirmedAt: undefined, sourceLabel: activeManifest.sourceLabel, appVersion, recordingMode: activeManifest.mode },
+      recordingMetadata: stored.recordingMetadata ?? { mode: activeManifest.mode, sourceLabel: activeManifest.sourceLabel, appVersion, platform: platformLabel, recoveredFromManifest: true },
+    };
+  }
   const permissionConfirmed = el<HTMLInputElement>("permissionConfirm").checked;
   const matchMetadata = {
     matchTitle: el<HTMLInputElement>("matchTitle").value.trim(),
@@ -679,6 +700,10 @@ async function saveChunk(blob: Blob) {
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
   } catch (error) {
     setText("uploadStatus", error instanceof Error ? `Chunk write failed: ${error.message}. Stop recording and check disk permissions.` : "Chunk write failed. Stop recording and check disk permissions.");
+    if (recorder && recorder.state === "recording") {
+      setStatus("Chunk write failed");
+      recorder.stop();
+    }
   }
 }
 
@@ -725,11 +750,16 @@ async function renderRecoveries() {
       try {
         const recovered = await window.videoBlitzerRecorder.recoverSession(session, settings.outputFolder);
         savedFile = recovered;
-        activeManifest = { ...session, finalFilePath: recovered.filePath };
+        activeManifest = { ...session, finalFilePath: recovered.filePath, completedAt: new Date().toISOString() };
+        markers = (session.markers ?? []) as typeof markers;
+        selectedMode = session.mode || selectedMode;
+        await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: session.outputFolder ?? settings.outputFolder });
         lastBlob = null;
         setText("savedPath", recovered.filePath);
+        setText("reviewSource", session.sourceLabel ?? "Recovered source");
         setText("uploadStatus", "Recovered recording locally. Review and upload when ready.");
         el<HTMLButtonElement>("uploadRecording").disabled = false;
+        renderMarkers();
       } catch (error) { setText("uploadStatus", error instanceof Error ? error.message : "Could not recover recording."); }
     });
     list.appendChild(node);
