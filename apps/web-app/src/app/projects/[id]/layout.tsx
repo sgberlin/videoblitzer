@@ -1,2 +1,2 @@
-const tabs = ["overview", "timeline", "match-data", "highlights", "captions", "commentary", "thumbnail", "social-pack", "exports", "debug"];
+const tabs = ["overview", "imports", "timeline", "match-data", "highlights", "captions", "commentary", "thumbnail", "social-pack", "exports", "debug"];
 export default function ProjectLayout({ children, params }: { children: React.ReactNode; params: { id: string } }) { return <><section className="hero"><span className="pill">Project Workspace</span><h1>{params.id}</h1><div className="tabs">{tabs.map((tab) => <a className="tab" key={tab} href={`/projects/${params.id}/${tab}`}>{tab.replace("-", " ")}</a>)}</div></section><br />{children}</>; }

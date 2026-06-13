@@ -28,6 +28,10 @@ const envSchema = z.object({
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
   REDIS_URL: z.string().url().optional(),
+  RECORDER_DOWNLOAD_DIR: z.string().default("/var/www/videoblitzer-api/recorder-downloads"),
+  IMPORT_MAX_BYTES: z.coerce.number().default(1024 * 1024 * 1024),
+  IMPORT_REQUEST_TIMEOUT_MS: z.coerce.number().default(30000),
+  IMPORT_REDIRECT_LIMIT: z.coerce.number().default(3),
   PORT: z.coerce.number().default(8080),
 });
 

@@ -2,6 +2,7 @@ import { createHighlightCandidate } from "@videoblitzer/highlight-engine";
 import { clipCommand, extractFrameCommand, probeCommand, shortsExportCommand } from "./ffmpeg";
 import { createClient } from "@supabase/supabase-js";
 import { convertWebmToMp4FromR2 } from "./r2Conversion";
+import { processOneImportJob } from "./directImport";
 export { convertWebmToMp4FromR2 } from "./r2Conversion";
 
 export async function analyzeVideo(projectId: string, inputPath: string) {
@@ -116,6 +117,8 @@ export async function startWorkerDaemon() {
   console.log(`VideoBlitzer video worker daemon polling every ${intervalMs}ms`);
   for (;;) {
     try {
+      const importResult = await processOneImportJob(supabase());
+      if (importResult.processed) console.log("[video-worker] imported", importResult);
       const result = await processOneExportJob();
       if (result.processed) console.log("[video-worker] processed", result);
     } catch (error) {
