@@ -4,8 +4,12 @@ import { authDebug, clearStaleAuthErrors, resolveSupabaseSession } from "./auth"
 
 function friendlyApiError(body: string, fallback: string) {
   try {
-    const parsed = JSON.parse(body) as { error?: string };
-    return parsed.error ?? fallback;
+    const parsed = JSON.parse(body) as { error?: string; code?: string; creditCost?: number; balance?: number };
+    if (parsed.code === "email_not_allowed") return "email_not_allowed: This email is not approved for the VideoBlitzer private beta.";
+    if (parsed.code === "token_verify_failed") return "token_verify_failed: Your session expired or could not be verified. Request a new magic link.";
+    if (parsed.code === "missing_auth_header" || parsed.code === "invalid_auth_header") return "missing_auth_header: Please sign in again.";
+    if (parsed.code === "insufficient_credits") return `insufficient_credits: ${parsed.error ?? "This action requires more credits."}`;
+    return parsed.code ? `${parsed.code}: ${parsed.error ?? fallback}` : parsed.error ?? fallback;
   } catch {
     return body || fallback;
   }

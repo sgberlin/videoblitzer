@@ -22,6 +22,8 @@
     "express": "latest",
     "express-rate-limit": "latest",
     "helmet": "latest",
+    "rate-limit-redis": "^5.0.0",
+    "redis": "^5.12.1",
     "stripe": "latest",
     "zod": "latest"
   },

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { authDebug, clearStaleAuthErrors } from "../../../lib/auth";
+import { authDebug, clearStaleAuthErrors, resolveSupabaseSession } from "../../../lib/auth";
 import { clearLoginCooldown } from "../../../lib/loginCooldown";
 import { createBrowserSupabaseClient } from "../../../lib/supabase";
 
@@ -18,7 +18,19 @@ export default function AuthCallbackPage() {
         return;
       }
 
-      for (let attempt = 0; attempt < 12; attempt += 1) {
+      try {
+        const session = await resolveSupabaseSession();
+        if (session) {
+          clearStaleAuthErrors();
+          clearLoginCooldown();
+          window.location.replace("/dashboard");
+          return;
+        }
+      } catch (error) {
+        authDebug("callback explicit exchange failed", { error: error instanceof Error ? error.message : String(error), currentRoute: window.location.pathname });
+      }
+
+      for (let attempt = 0; attempt < 20; attempt += 1) {
         const { data, error } = await supabase.auth.getSession();
         authDebug("callback getSession", {
           attempt,

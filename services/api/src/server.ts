@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { ZodError } from "zod";
 import { config } from "./config";
 import { adminRouter } from "./routes/admin";
 import { authRouter } from "./routes/auth";
@@ -55,7 +56,12 @@ app.use("/admin", adminRouter);
 
 app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "Internal server error";
-  res.status(400).json({ error: message });
+  if (error instanceof ZodError) return res.status(400).json({ error: "Validation failed", details: error.issues });
+  const lower = message.toLowerCase();
+  if (lower.includes("insufficient credits")) return res.status(402).json({ error: message, code: "insufficient_credits" });
+  if (lower.includes("unauthorized") || lower.includes("auth")) return res.status(401).json({ error: message });
+  if (lower.includes("owner access") || lower.includes("forbidden")) return res.status(403).json({ error: message });
+  return res.status(500).json({ error: message });
 });
 
 app.listen(config.PORT, () => {

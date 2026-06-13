@@ -133,10 +133,14 @@ export function useAuthSession() {
 
 export function isPrivateBetaError(message: string) {
   const lower = message.toLowerCase();
-  return lower.includes("private beta") || lower.includes("allowed_user_not_found") || lower.includes("allowed_user_not_active") || lower.includes("access required");
+  return lower.includes("private beta") || lower.includes("email_not_allowed") || lower.includes("allowed_user_not_found") || lower.includes("allowed_user_not_active");
 }
 
 export function isInvalidLinkError(message: string) {
   const lower = message.toLowerCase();
-  return lower.includes("expired") || lower.includes("invalid link") || lower.includes("otp_expired") || lower.includes("jwt_verification_failed");
+  return lower.includes("expired") || lower.includes("invalid link") || lower.includes("otp_expired") || lower.includes("jwt_verification_failed") || lower.includes("token_verify_failed") || lower.includes("missing_auth_header") || lower.includes("invalid_auth_header");
+}
+
+export function isOwnerRequiredError(message: string) {
+  return message.toLowerCase().includes("owner access required");
 }

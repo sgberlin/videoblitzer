@@ -53,21 +53,34 @@ export function ProjectWorkspaceClient({ projectId, tab }: { projectId: string; 
       return;
     }
 
-    setAuthStatus("authenticated");
-    setLoading(true);
-    apiFetch<ProjectDetail>(`/projects/${projectId}`, {}, auth.session?.access_token)
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    const loadProject = (showLoading: boolean) => {
+      if (showLoading) setLoading(true);
+      apiFetch<ProjectDetail>(`/projects/${projectId}`, {}, auth.session?.access_token)
       .then((response) => {
+        if (cancelled) return;
         setData(response);
         setError("");
         authDebug("allowlist result", { allowed: true, userEmail: auth.email, currentRoute: `/projects/${projectId}` });
+        const active = [...response.jobs, ...(response.exportJobs ?? [])].some((job) => ["queued", "processing"].includes(String(job.status)));
+        if (active) timeoutId = window.setTimeout(() => loadProject(false), 5000);
       })
       .catch((err: Error) => {
+        if (cancelled) return;
         authDebug("allowlist result", { allowed: false, userEmail: auth.email, error: err.message, currentRoute: `/projects/${projectId}` });
         if (isPrivateBetaError(err.message)) setAuthStatus("unauthorized_email");
         else if (isInvalidLinkError(err.message)) setAuthStatus("invalid_link");
         else setError(err.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once." : err.message);
       })
       .finally(() => setLoading(false));
+    };
+    setAuthStatus("authenticated");
+    loadProject(true);
+    return () => {
+      cancelled = true;
+      if (timeoutId) window.clearTimeout(timeoutId);
+    };
   }, [auth.email, auth.session?.access_token, auth.status, projectId]);
 
   if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;

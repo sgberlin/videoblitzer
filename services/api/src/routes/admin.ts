@@ -15,9 +15,10 @@ adminRouter.get("/users", async (_req, res) => {
 });
 
 adminRouter.post("/users", async (req, res) => {
-  const body = z.object({ email: z.string().email(), role: z.enum(["owner", "admin", "member"]).default("member"), planKey: z.string().default("starter_weekly"), isUnlimited: z.boolean().default(false) }).parse(req.body);
+  const body = z.object({ email: z.string().email(), role: z.enum(["admin", "member"]).default("member"), planKey: z.string().default("starter_weekly"), isUnlimited: z.boolean().default(false) }).parse(req.body);
   const supabase = createServiceClient();
-  if (supabase) await supabase.from("allowed_users").upsert({ email: body.email.trim().toLowerCase(), role: body.role, plan_key: body.planKey, is_unlimited: body.isUnlimited, status: "active" });
+  if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
+  await supabase.from("allowed_users").upsert({ email: body.email.trim().toLowerCase(), role: body.role, plan_key: body.planKey, is_unlimited: body.isUnlimited, status: "active" });
   return res.status(201).json({ ok: true });
 });
 
@@ -86,9 +87,15 @@ adminRouter.get("/worker-status", async (_req, res) => {
 adminRouter.post("/jobs/:id/retry", async (req, res) => {
   const supabase = createServiceClient();
   if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
-  const { data, error } = await supabase.from("jobs").update({ status: "queued", progress: 0, error: null, attempts: 1, updated_at: new Date().toISOString() }).eq("id", req.params.id).select("*").maybeSingle();
+  const { data: existing, error: lookupError } = await supabase.from("jobs").select("*").eq("id", req.params.id).maybeSingle();
+  if (lookupError) return res.status(500).json({ error: lookupError.message });
+  if (!existing) return res.status(404).json({ error: "Job not found" });
+  if (existing.status !== "failed") return res.status(409).json({ error: "Only failed jobs can be retried.", code: "job_not_retryable" });
+  if ((existing.attempts ?? 0) >= 3) return res.status(409).json({ error: "Retry limit reached.", code: "retry_limit_reached" });
+  const nextAttempts = (existing.attempts ?? 0) + 1;
+  const { data, error } = await supabase.from("jobs").update({ status: "queued", progress: 0, error: null, attempts: nextAttempts, updated_at: new Date().toISOString() }).eq("id", req.params.id).select("*").maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
-  await supabase.from("export_jobs").update({ status: "queued", error_message: null }).eq("id", req.params.id);
+  await supabase.from("export_jobs").update({ status: "queued", error_message: null, attempts: nextAttempts, locked_at: null, worker_id: null, updated_at: new Date().toISOString() }).eq("id", req.params.id).eq("status", "failed");
   return res.json({ job: data });
 });
 

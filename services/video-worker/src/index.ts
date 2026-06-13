@@ -29,7 +29,11 @@ type ExportJob = {
   source_format: string;
   target_format: string;
   status: string;
+  attempts?: number | null;
 };
+
+const workerId = `${process.pid}-${crypto.randomUUID()}`;
+const maxAttempts = Number(process.env.VIDEO_WORKER_MAX_ATTEMPTS ?? 3);
 
 function serviceKey() {
   return process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
@@ -49,19 +53,39 @@ function supabase() {
 async function markJob(id: string, status: "queued" | "processing" | "completed" | "failed", patch: Record<string, unknown> = {}) {
   const client = supabase();
   await client.from("jobs").update({ status, updated_at: new Date().toISOString(), ...patch }).eq("id", id);
-  await client.from("export_jobs").update({ status, ...(status === "completed" ? { completed_at: new Date().toISOString() } : {}), ...(patch.error ? { error_message: String(patch.error) } : {}) }).eq("id", id);
+  await client.from("export_jobs").update({ status, updated_at: new Date().toISOString(), locked_at: null, worker_id: null, ...(status === "completed" ? { completed_at: new Date().toISOString() } : {}), ...(patch.error ? { error_message: String(patch.error) } : {}) }).eq("id", id);
+}
+
+async function requeueStaleJobs() {
+  const client = supabase();
+  const leaseMinutes = Number(process.env.VIDEO_WORKER_LEASE_MINUTES ?? 30);
+  const staleBefore = new Date(Date.now() - leaseMinutes * 60_000).toISOString();
+  const { data, error } = await client.from("export_jobs").select("id,attempts").eq("status", "processing").lt("locked_at", staleBefore).lt("attempts", maxAttempts);
+  if (error) throw new Error(error.message);
+  for (const job of data ?? []) {
+    await client.from("export_jobs").update({ status: "queued", locked_at: null, worker_id: null, error_message: "Requeued after stale worker lease.", updated_at: new Date().toISOString() }).eq("id", job.id);
+    await client.from("jobs").update({ status: "queued", error: "Requeued after stale worker lease.", updated_at: new Date().toISOString() }).eq("id", job.id);
+  }
+  const { data: expired, error: expiredError } = await client.from("export_jobs").select("id,video_id").eq("status", "processing").lt("locked_at", staleBefore).gte("attempts", maxAttempts);
+  if (expiredError) throw new Error(expiredError.message);
+  for (const job of expired ?? []) {
+    await markJob(job.id, "failed", { progress: 100, error: "Retry limit reached after stale worker leases." });
+    if (job.video_id) await client.from("videos").update({ conversion_status: "failed" }).eq("id", job.video_id);
+  }
 }
 
 async function claimQueuedExportJob() {
   const client = supabase();
-  const { data: candidates, error } = await client.from("export_jobs").select("*").eq("status", "queued").order("created_at", { ascending: true }).limit(1);
+  await requeueStaleJobs();
+  const { data: candidates, error } = await client.from("export_jobs").select("*").eq("status", "queued").lt("attempts", maxAttempts).order("created_at", { ascending: true }).limit(1);
   if (error) throw new Error(error.message);
   const candidate = candidates?.[0] as ExportJob | undefined;
   if (!candidate) return null;
-  const { data: claimed, error: claimError } = await client.from("export_jobs").update({ status: "processing" }).eq("id", candidate.id).eq("status", "queued").select("*").maybeSingle();
+  const nextAttempts = (candidate.attempts ?? 0) + 1;
+  const { data: claimed, error: claimError } = await client.from("export_jobs").update({ status: "processing", attempts: nextAttempts, locked_at: new Date().toISOString(), worker_id: workerId, updated_at: new Date().toISOString() }).eq("id", candidate.id).eq("status", "queued").select("*").maybeSingle();
   if (claimError) throw new Error(claimError.message);
   if (!claimed) return null;
-  await client.from("jobs").update({ status: "processing", progress: 10, updated_at: new Date().toISOString() }).eq("id", candidate.id);
+  await client.from("jobs").update({ status: "processing", progress: 10, attempts: nextAttempts, updated_at: new Date().toISOString() }).eq("id", candidate.id);
   if (candidate.video_id) await client.from("videos").update({ conversion_status: "processing" }).eq("id", candidate.video_id);
   return claimed as ExportJob;
 }

@@ -59,7 +59,7 @@ function Guard<T>({ state, children }: { state: ReturnType<typeof useAdminData<T
 export function AdminUsersClient() {
   const state = useAdminData<{ users: AdminUser[] }>("/admin/users");
   const [email, setEmail] = useState("");
-  const [role, setRole] = useState<"owner" | "admin" | "member">("member");
+  const [role, setRole] = useState<"admin" | "member">("member");
   const [planKey, setPlanKey] = useState("starter_weekly");
   const [isUnlimited, setIsUnlimited] = useState(false);
   const [message, setMessage] = useState("");
@@ -80,7 +80,7 @@ export function AdminUsersClient() {
 
   return <Guard state={state}>{(data, reload) => <section className="grid">
     <div className="hero"><span className="pill">Owner only</span><h1>Allowed Users</h1><p className="muted">Manage private beta access, roles, plans, and unlimited owner/admin users.</p></div>
-    <div className="card"><h3>Add or update user</h3><div className="grid grid-2"><input className="input" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="user@example.com" /><select className="input" value={role} onChange={(event) => setRole(event.target.value as typeof role)}><option value="member">Member</option><option value="admin">Admin</option><option value="owner">Owner</option></select><input className="input" value={planKey} onChange={(event) => setPlanKey(event.target.value)} placeholder="plan key" /><label className="toggle"><input type="checkbox" checked={isUnlimited} onChange={(event) => setIsUnlimited(event.target.checked)} /> Unlimited credits</label></div><br /><button className="button" onClick={() => void addUser(reload)}>Save allowed user</button><p className="muted">{message}</p></div>
+    <div className="card"><h3>Add or update user</h3><div className="grid grid-2"><input className="input" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="user@example.com" /><select className="input" value={role} onChange={(event) => setRole(event.target.value as typeof role)}><option value="member">Member</option><option value="admin">Admin</option></select><input className="input" value={planKey} onChange={(event) => setPlanKey(event.target.value)} placeholder="plan key" /><label className="toggle"><input type="checkbox" checked={isUnlimited} onChange={(event) => setIsUnlimited(event.target.checked)} /> Unlimited credits</label></div><br /><button className="button" onClick={() => void addUser(reload)}>Save allowed user</button><p className="muted">Owner access is reserved for the server-side OWNER_EMAIL bootstrap.</p><p className="muted">{message}</p></div>
     <div className="grid grid-2">{data.users.map((user) => <div className="card" key={user.email}><h3>{user.email}</h3><p>{user.role} · {user.plan_key} · {user.status ?? "active"}</p><p className="muted">Unlimited: {user.is_unlimited ? "yes" : "no"}</p><button className="button secondary" onClick={() => void deleteUser(user.email, reload)}>Remove</button></div>)}</div>
   </section>}</Guard>;
 }
@@ -103,7 +103,7 @@ export function AdminJobsClient() {
       <div className="grid grid-2">{allJobs.map((job) => {
         const sourceKey = job.source_object_key ?? String(job.input?.sourceObjectKey ?? "");
         const targetKey = job.target_object_key ?? String(job.input?.targetObjectKey ?? job.output?.targetObjectKey ?? "");
-        return <div className="card" key={`${job.type}-${job.id}`}><h3>{job.type ?? "job"} · {job.status}</h3><p className="muted">{job.id}</p><p>Progress: {job.progress ?? "--"}%</p>{sourceKey && <p><strong>R2 source key</strong><br /><span className="muted">{sourceKey}</span></p>}{targetKey && <p><strong>Conversion output key</strong><br /><span className="muted">{targetKey}</span></p>}{(job.error || job.error_message) && <p className="warning">{job.error ?? job.error_message}</p>}<button className="button secondary" onClick={() => void retry(job.id, reload)}>Retry job</button></div>;
+        return <div className="card" key={`${job.type}-${job.id}`}><h3>{job.type ?? "job"} · {job.status}</h3><p className="muted">{job.id}</p><p>Progress: {job.progress ?? "--"}%</p>{sourceKey && <p><strong>R2 source key</strong><br /><span className="muted">{sourceKey}</span></p>}{targetKey && <p><strong>Conversion output key</strong><br /><span className="muted">{targetKey}</span></p>}{(job.error || job.error_message) && <p className="warning">{job.error ?? job.error_message}</p>}<button className="button secondary" disabled={job.status !== "failed"} onClick={() => void retry(job.id, reload)}>Retry failed job</button></div>;
       })}</div></section>;
   }}</Guard>;
 }

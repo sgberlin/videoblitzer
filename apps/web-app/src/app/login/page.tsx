@@ -49,6 +49,10 @@ export default function LoginPage() {
     setNow(currentTime);
     setCooldownUntil(persistedCooldown?.until ?? 0);
     setCooldownReason(persistedCooldown?.reason ?? null);
+    const supabase = createBrowserSupabaseClient();
+    void supabase?.auth.getSession().then(({ data }) => {
+      if (data.session) window.location.replace("/dashboard");
+    });
   }, []);
 
   useEffect(() => {

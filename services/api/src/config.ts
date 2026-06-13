@@ -27,6 +27,7 @@ const envSchema = z.object({
   SPORTRADAR_API_KEY: z.string().optional(),
   STRIPE_SECRET_KEY: z.string().optional(),
   STRIPE_WEBHOOK_SECRET: z.string().optional(),
+  REDIS_URL: z.string().url().optional(),
   PORT: z.coerce.number().default(8080),
 });
 
