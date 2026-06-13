@@ -1,4 +1,4 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import { createReadStream, createWriteStream } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,6 +6,9 @@ import { join } from "node:path";
 import { pipeline } from "node:stream/promises";
 import { spawn } from "node:child_process";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+
+dotenv.config();
+dotenv.config({ path: process.env.API_ENV_PATH ?? process.env.WORKER_ENV_PATH ?? "/var/www/videoblitzer-api/.env" });
 
 export interface ConvertWebmToMp4Input {
   bucket?: string;

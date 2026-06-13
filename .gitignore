@@ -11,3 +11,7 @@ coverage
 .vercel
 out
 build
+!apps/desktop-recorder/build/
+!apps/desktop-recorder/build/**
+apps/desktop-recorder/build/icon.iconset/
+apps/desktop-recorder/release/

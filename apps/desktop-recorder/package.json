@@ -1,6 +1,8 @@
 {
   "name": "@videoblitzer/desktop-recorder",
   "version": "0.1.0",
+  "description": "Production desktop recorder for VideoBlitzer uploads and local capture workflows.",
+  "author": "VideoBlitzer",
   "private": true,
   "type": "module",
   "main": "dist/main.js",
@@ -9,15 +11,14 @@
     "build": "tsc && node scripts/copy-assets.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "package:mac": "npm run build && electron-builder --mac dmg --config electron-builder.json",
-    "package:win": "npm run build && electron-builder --win nsis --config electron-builder.json"
+    "package:mac": "npm run build && electron-builder --mac dmg --x64 --arm64 --config electron-builder.json",
+    "package:win": "npm run build && electron-builder --win nsis --x64 --config electron-builder.json"
   },
-  "dependencies": {
-    "electron": "latest"
-  },
+  "dependencies": {},
   "devDependencies": {
+    "electron": "^30.5.1",
+    "electron-builder": "^24.13.3",
     "tsx": "latest",
-    "typescript": "latest",
-    "electron-builder": "latest"
+    "typescript": "latest"
   }
 }

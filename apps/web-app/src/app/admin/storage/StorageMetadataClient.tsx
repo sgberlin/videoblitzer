@@ -28,7 +28,7 @@ export function StorageMetadataClient() {
 
     setAuthStatus("authenticated");
     setLoading(true);
-    apiFetch<{ metadata: R2Usage }>("/storage/metadata", {}, auth.session?.access_token)
+    apiFetch<{ metadata: R2Usage }>("/admin/storage", {}, auth.session?.access_token)
       .then((response) => {
         setMetadata(response.metadata);
         setError("");

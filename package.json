@@ -13,7 +13,7 @@
     "dev:marketing": "npm --workspace apps/marketing-site run dev",
     "dev:api": "npm --workspace services/api run dev",
     "build": "npm run build --workspaces",
-    "lint": "tsc --noEmit",
+    "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces"
   },
   "devDependencies": {

@@ -2,6 +2,7 @@ import { Router, type Request, type Response } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { createServiceClient } from "../supabase";
+import { userOwnsProject } from "../lib/ownership";
 
 export const sourceImportRouter = Router();
 sourceImportRouter.use(requireAuth);
@@ -56,6 +57,13 @@ sourceImportRouter.post("/audit", async (req, res) => {
   }).parse(req.body);
   if (!body.permissionConfirmed) return res.status(400).json({ error: "Permission confirmation is required." });
   if (body.importMethod === "direct_media_url" && body.sourceUrl && !isDirectMediaUrl(body.sourceUrl)) return res.status(400).json({ error: "Direct URL is not a supported media file URL." });
+  if (body.projectId) {
+    try {
+      if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
+    } catch (error) {
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Ownership check failed" });
+    }
+  }
 
   const audit = {
     id: crypto.randomUUID(),

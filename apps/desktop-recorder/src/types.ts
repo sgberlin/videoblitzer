@@ -1,6 +1,6 @@
 export type RecorderMode = "browser" | "match" | "screen" | "sports" | "business" | "training" | "upload" | "link";
 export interface RecorderSource { id: string; name: string; thumbnail: string; kind?: "screen" | "window" | "browser"; }
-export interface RecorderSettings { apiUrl: string; outputFolder?: string; rememberToken: boolean; token?: string; quality: "standard" | "high" | "match"; includeMicrophone: boolean; includeSystemAudio?: boolean; selectedMicDeviceId?: string; autoUpload?: boolean; }
+export interface RecorderSettings { apiUrl: string; outputFolder?: string; rememberToken: boolean; token?: string; quality: "standard" | "high" | "match"; includeMicrophone: boolean; includeSystemAudio?: boolean; selectedMicDeviceId?: string; autoUpload?: boolean; resolution?: "source" | "720p" | "1080p" | "1440p" | "2160p"; frameRate?: 30 | 60; existingProjectId?: string; }
 export interface SaveRecordingInput { arrayBuffer: ArrayBuffer; filename: string; outputFolder?: string; }
 export interface SaveRecordingResult { filePath: string; sizeBytes: number; }
 export interface RecordingChunkRecord { index: number; filename: string; filePath: string; sizeBytes: number; durationEstimateSeconds?: number; createdAt: string; }

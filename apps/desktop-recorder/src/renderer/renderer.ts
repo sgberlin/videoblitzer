@@ -13,7 +13,7 @@ let timerInterval: number | undefined;
 let lastBlob: Blob | null = null;
 let savedFile: SaveRecordingResult | null = null;
 let selectedMime = "video/webm";
-let selectedMode = "sports";
+let selectedMode = "browser";
 let sourceFilter: "screen" | "window" | "browser" = "screen";
 let markers: Array<{ time: string; label: string; note: string; seconds?: number; createdAt?: string }> = [];
 let activeManifest: RecordingManifest | null = null;
@@ -22,6 +22,7 @@ let appVersion = "0.1.0";
 let platformLabel = "unknown";
 let combineVideoPath = "";
 let combineAudioPath = "";
+let activeUploadXhr: XMLHttpRequest | null = null;
 interface MatchEvent { id: string; minute: number; stoppageMinute?: number; period: string; team?: string; player?: string; assistingPlayer?: string; eventType: string; description: string; source: string; confidence: string; importanceScore: number; ignored?: boolean; }
 type HighlightLength = "5" | "15" | "25";
 interface HighlightSegment { order: number; title: string; targetSeconds: number; matchMinute: string; sourceTimestamp: string; reason: string; voiceoverPrompt: string; captionIdea: string; }
@@ -47,6 +48,19 @@ function timestamp() {
 }
 function extensionForMime(mime: string) { return mime.startsWith("video/mp4") ? "mp4" : "webm"; }
 function contentTypeForMime(mime: string) { return mime.startsWith("video/mp4") ? "video/mp4" : "video/webm"; }
+function contentTypeForFilePath(filePath: string) {
+  const lower = filePath.toLowerCase();
+  if (lower.endsWith(".mp4")) return "video/mp4";
+  if (lower.endsWith(".mov")) return "video/quicktime";
+  if (lower.endsWith(".mkv")) return "video/x-matroska";
+  return "video/webm";
+}
+function rawFormatForContentType(contentType: string) {
+  if (contentType === "video/mp4") return "mp4";
+  if (contentType === "video/quicktime") return "mov";
+  if (contentType === "video/x-matroska") return "mkv";
+  return "webm";
+}
 function slug(value: string) { return value.trim().replace(/[^a-zA-Z0-9._-]+/g, "_").replace(/^_+|_+$/g, "") || "VideoBlitzer"; }
 function filenameForMime(mime: string) {
   const stamp = timestamp().slice(0, 16);
@@ -126,6 +140,9 @@ async function loadSettings() {
   el<HTMLInputElement>("includeMic").checked = settings.includeMicrophone;
   el<HTMLInputElement>("systemAudioToggle").checked = Boolean(settings.includeSystemAudio);
   el<HTMLSelectElement>("quality").value = settings.quality;
+  el<HTMLSelectElement>("resolution").value = settings.resolution ?? "source";
+  el<HTMLSelectElement>("frameRate").value = String(settings.frameRate ?? 60);
+  el<HTMLInputElement>("existingProjectId").value = settings.existingProjectId ?? "";
   if (settings.selectedMicDeviceId) el<HTMLSelectElement>("micSelect").value = settings.selectedMicDeviceId;
   updateAudioStatus();
   if (settings.outputFolder) setText("outputFolder", settings.outputFolder);
@@ -138,9 +155,12 @@ async function saveSettings() {
     rememberToken: el<HTMLInputElement>("rememberToken").checked,
     token: selectedToken(),
     quality: el<HTMLSelectElement>("quality").value as RecorderSettings["quality"],
+    resolution: el<HTMLSelectElement>("resolution").value as RecorderSettings["resolution"],
+    frameRate: Number(el<HTMLSelectElement>("frameRate").value) as RecorderSettings["frameRate"],
     includeMicrophone: el<HTMLInputElement>("includeMic").checked,
     includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked,
     selectedMicDeviceId: el<HTMLSelectElement>("micSelect").value || undefined,
+    existingProjectId: el<HTMLInputElement>("existingProjectId").value.trim() || undefined,
     autoUpload: false,
   };
   await window.videoBlitzerRecorder.saveSettings(settings);
@@ -157,6 +177,8 @@ async function refreshSources() {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "source-card";
+    if (source.kind === "browser") card.classList.add("browser-source");
+    card.dataset.sourceId = source.id;
     card.innerHTML = `<img src="${source.thumbnail}" alt=""><strong>${source.name}</strong><br><small>${source.id}</small>`;
     card.addEventListener("click", () => selectSource(source));
     list.appendChild(card);
@@ -172,7 +194,7 @@ function selectSource(source: RecorderSource) {
   setText("selectedSourceLabel", source.name);
   setText("sourceStatus", "Ready");
   setText("reviewSource", source.name);
-  [...document.querySelectorAll(".source-card")].forEach((node, index) => node.classList.toggle("selected", sources[index]?.id === source.id));
+  [...document.querySelectorAll(".source-card")].forEach((node) => node.classList.toggle("selected", (node as HTMLElement).dataset.sourceId === source.id));
   el<HTMLButtonElement>("startRecording").disabled = false;
   el("previewPlaceholder").textContent = "Source ready. Preview appears when recording starts.";
   setStatus("Source selected");
@@ -180,13 +202,17 @@ function selectSource(source: RecorderSource) {
 
 async function buildStream() {
   if (!selectedSource) throw new Error("Select a screen or window before recording.");
+  const resolution = el<HTMLSelectElement>("resolution").value;
+  const resolutionConstraints: Record<string, number> = resolution === "720p" ? { maxWidth: 1280, maxHeight: 720 } : resolution === "1080p" ? { maxWidth: 1920, maxHeight: 1080 } : resolution === "1440p" ? { maxWidth: 2560, maxHeight: 1440 } : resolution === "2160p" ? { maxWidth: 3840, maxHeight: 2160 } : {};
+  const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
   const videoConstraints = {
     audio: el<HTMLInputElement>("systemAudioToggle").checked ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: selectedSource.id } } : false,
     video: {
       mandatory: {
         chromeMediaSource: "desktop",
         chromeMediaSourceId: selectedSource.id,
-        maxFrameRate: 60,
+        maxFrameRate: frameRate,
+        ...resolutionConstraints,
       },
     },
   } as unknown as MediaStreamConstraints;
@@ -295,45 +321,54 @@ async function finishRecording() {
 function uploadToSignedUrl(blob: Blob, signedUrl: string, requiredHeaders: Record<string, string> | undefined, onProgress: (value: number) => void) {
   return new Promise<void>((resolve, reject) => {
     const xhr = new XMLHttpRequest();
+    activeUploadXhr = xhr;
+    el<HTMLButtonElement>("cancelUpload").disabled = false;
     xhr.open("PUT", signedUrl);
     const headerValue = requiredHeaders?.["Content-Type"] ?? blob.type;
     if (headerValue) xhr.setRequestHeader("Content-Type", headerValue);
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
-    xhr.onload = () => xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`R2 upload failed with status ${xhr.status}`));
-    xhr.onerror = () => reject(new Error("R2 upload failed. Check your connection and try again."));
+    xhr.onload = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`R2 upload failed with status ${xhr.status}`)); };
+    xhr.onabort = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; reject(new Error("Upload cancelled. Local file is still available and can be retried.")); };
+    xhr.onerror = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; reject(new Error("R2 upload failed. Check your connection and try again.")); };
     xhr.send(blob);
   });
 }
 
 async function uploadRecording() {
-  if (!lastBlob || !savedFile) { setText("uploadStatus", "Record and save a WebM file first."); return; }
+  if (!savedFile) { setText("uploadStatus", "Record, recover, combine, or import a local video file first."); return; }
   try {
     await saveSettings();
     updateUploadProgress(0);
-    setText("uploadStatus", "Creating desktop recorder project...");
+    if (activeManifest) { activeManifest.uploadStatus = "uploading"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
+    setText("uploadStatus", "Creating or selecting VideoBlitzer project...");
     const metadata = collectMetadata();
     const title = metadata.matchMetadata.matchTitle || (selectedMode === "match" ? `${metadata.matchMetadata.teamA || "Team A"} vs ${metadata.matchMetadata.teamB || "Team B"}` : `Browser recording ${timestamp()}`);
-    const created = await api<{ project: { id: string; title: string } }>("/projects", { method: "POST", body: JSON.stringify({ title, source_type: "desktop_recorder", recording_mode: selectedMode, source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, source_metadata: { sourceLabel: selectedSource?.name, sourcePlatform: metadata.matchMetadata.sourcePlatform } }) });
+    const existingProjectId = el<HTMLInputElement>("existingProjectId").value.trim();
+    const created = existingProjectId ? { project: { id: existingProjectId, title } } : await api<{ project: { id: string; title: string } }>("/projects", { method: "POST", body: JSON.stringify({ title, source_type: "desktop_recorder", recording_mode: selectedMode, source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, source_metadata: { sourceLabel: selectedSource?.name, sourcePlatform: metadata.matchMetadata.sourcePlatform } }) });
     setText("projectId", created.project.id);
 
     const filename = savedFile.filePath.split(/[\\/]/).pop() ?? filenameForMime(selectedMime);
+    const contentType = contentTypeForFilePath(savedFile.filePath);
+    const rawFormat = rawFormatForContentType(contentType);
+    const uploadBlob = lastBlob ?? new Blob([(await window.videoBlitzerRecorder.readLocalFile(savedFile.filePath)).arrayBuffer], { type: contentType });
     setText("uploadStatus", "Requesting signed R2 upload URL...");
-    const signed = await api<{ signedUrl?: string; uploadUrl?: string; objectKey?: string; key?: string; requiredHeaders?: Record<string, string> }>("/uploads/create-signed-url", { method: "POST", body: JSON.stringify({ projectId: created.project.id, filename, contentType: "video/webm" }) });
+    const signed = await api<{ signedUrl?: string; uploadUrl?: string; objectKey?: string; key?: string; requiredHeaders?: Record<string, string> }>("/uploads/create-signed-url", { method: "POST", body: JSON.stringify({ projectId: created.project.id, filename, contentType }) });
     const signedUrl = signed.signedUrl ?? signed.uploadUrl;
     const objectKey = signed.objectKey ?? signed.key;
     if (!signedUrl || !objectKey) throw new Error("API did not return a signed upload URL.");
 
-    setText("uploadStatus", "Uploading WebM directly to Cloudflare R2...");
-    await uploadToSignedUrl(lastBlob, signedUrl, signed.requiredHeaders, updateUploadProgress);
+    setText("uploadStatus", `Uploading ${rawFormat.toUpperCase()} directly to Cloudflare R2...`);
+    await uploadToSignedUrl(uploadBlob, signedUrl, signed.requiredHeaders, updateUploadProgress);
     setText("objectKey", objectKey);
 
-    setText("uploadStatus", "Saving video record and queuing MP4 export...");
-    const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: "video/webm", size_bytes: savedFile.sizeBytes, raw_format: "webm", desired_export_format: "mp4", recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: "video/webm", duration_seconds: activeManifest?.durationEstimateSeconds }) });
+    setText("uploadStatus", "Saving video record and queuing backend work...");
+    const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: contentType, size_bytes: savedFile.sizeBytes, raw_format: rawFormat, desired_export_format: rawFormat === "webm" ? "mp4" : undefined, recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: contentType, duration_seconds: activeManifest?.durationEstimateSeconds }) });
     if (!completed.conversion_job) {
-      await api("/exports/convert", { method: "POST", body: JSON.stringify({ project_id: created.project.id, video_id: completed.video.id, source_object_key: objectKey, source_format: "webm", target_format: "mp4" }) });
+      if (rawFormat === "webm") await api("/exports/convert", { method: "POST", body: JSON.stringify({ project_id: created.project.id, video_id: completed.video.id, source_object_key: objectKey, source_format: "webm", target_format: "mp4" }) });
     }
+    await api("/jobs/analyze", { method: "POST", body: JSON.stringify({ projectId: created.project.id, videoId: completed.video.id }) });
     if (activeManifest) { activeManifest.uploadStatus = "uploaded"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
-    setText("uploadStatus", "Uploaded. MP4 conversion is queued for backend FFmpeg processing.");
+    setText("uploadStatus", rawFormat === "webm" ? "Uploaded. MP4 conversion and analysis are queued for backend processing." : "Uploaded. Analysis is queued for backend processing.");
     el("projectLink").innerHTML = `<a href="https://app.videoblitzer.com/projects/${created.project.id}/overview">Open project in web app</a>`;
     setStatus("Uploaded");
   } catch (error) {
@@ -445,7 +480,7 @@ function alignMatchClock() {
 }
 
 function checkMatchSuggestions(recordingElapsedSeconds: number) {
-  if (matchClockAtRecordingStartSeconds === null || selectedMode !== "sports") return;
+  if (matchClockAtRecordingStartSeconds === null || !["match", "sports"].includes(selectedMode)) return;
   const currentMatchSeconds = matchClockAtRecordingStartSeconds + recordingElapsedSeconds;
   for (const event of matchEvents) {
     if (event.ignored || suggestedEventIds.has(event.id) || event.importanceScore < 6) continue;
@@ -674,6 +709,8 @@ async function renderRecoveries() {
       try {
         const recovered = await window.videoBlitzerRecorder.recoverSession(session, settings.outputFolder);
         savedFile = recovered;
+        activeManifest = { ...session, finalFilePath: recovered.filePath };
+        lastBlob = null;
         setText("savedPath", recovered.filePath);
         setText("uploadStatus", "Recovered recording locally. Review and upload when ready.");
         el<HTMLButtonElement>("uploadRecording").disabled = false;
@@ -711,6 +748,7 @@ async function combineMedia() {
     if (!Number.isFinite(offset)) throw new Error("Audio offset must be a valid number.");
     const output = await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: combineVideoPath, audioPath: combineAudioPath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Combined_${timestamp()}.mp4`, offsetSeconds: offset, trimToShortest: el<HTMLInputElement>("trimShortest").checked });
     savedFile = output;
+    lastBlob = null;
     setText("savedPath", output.filePath);
     setText("combineStatus", `Combined MP4 saved: ${output.filePath}`);
     el<HTMLButtonElement>("uploadRecording").disabled = false;
@@ -809,11 +847,12 @@ function setupPremiumInteractions() {
     const target = (button as HTMLElement).dataset.scroll;
     if (target) el(target).scrollIntoView({ behavior: "smooth", block: "start" });
   }));
-  document.querySelectorAll(".mode-card").forEach((card) => card.addEventListener("click", () => selectMode((card as HTMLElement).dataset.mode ?? "sports")));
-  el("screenTab").addEventListener("click", () => { sourceFilter = "screen"; el("screenTab").classList.add("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
+  document.querySelectorAll(".mode-card").forEach((card) => card.addEventListener("click", () => selectMode((card as HTMLElement).dataset.mode ?? "browser")));
+  el("screenTab").addEventListener("click", () => { sourceFilter = "screen"; el("screenTab").classList.add("active"); el("windowTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
   el("windowTab").addEventListener("click", () => { sourceFilter = "window"; el("windowTab").classList.add("active"); el("screenTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
   el("browserTab").addEventListener("click", () => { sourceFilter = "browser"; el("browserTab").classList.add("active"); el("screenTab").classList.remove("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
   el("pauseRecording").addEventListener("click", pauseOrResume);
+  el("cancelUpload").addEventListener("click", () => activeUploadXhr?.abort());
   el("testMic").addEventListener("click", () => { startMicMeter(); window.setTimeout(stopMicMeter, 1800); setText("micWarning", "Mic test complete. If the meter moved, input is available."); });
   el("refreshRecovery").addEventListener("click", () => void renderRecoveries());
   el("clip15").addEventListener("click", () => void createQuickClip(15));
@@ -850,8 +889,9 @@ async function init() {
   el("uploadRecording").addEventListener("click", () => void uploadRecording());
   el("openLocation").addEventListener("click", () => { if (savedFile) void window.videoBlitzerRecorder.openFileLocation(savedFile.filePath); });
   el("selectFolder").addEventListener("click", async () => { const folder = await window.videoBlitzerRecorder.selectOutputFolder(); if (folder) { settings.outputFolder = folder; setText("outputFolder", folder); await saveSettings(); } });
-  ["apiUrl", "accessToken", "rememberToken", "includeMic", "quality"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
+  ["apiUrl", "accessToken", "rememberToken", "includeMic", "quality", "resolution", "frameRate", "existingProjectId"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
   setupPremiumInteractions();
+  selectMode((document.querySelector(".mode-card.selected") as HTMLElement | null)?.dataset.mode ?? "browser");
   renderMarkerButtons();
   await populateMicrophones();
   void refreshSources();

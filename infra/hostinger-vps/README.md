@@ -94,10 +94,11 @@ On the VPS:
 cd /var/www/videoblitzer-api
 npm ci
 npm --workspace @videoblitzer/api run build
+npm --workspace @videoblitzer/video-worker run build
 npm prune --omit=dev
 ```
 
-`npm ci` installs build dependencies, `npm --workspace @videoblitzer/api run build` creates `services/api/dist/server.js`, and `npm prune --omit=dev` leaves production dependencies for runtime.
+`npm ci` installs build dependencies, the API build creates `services/api/dist/server.js`, the worker build verifies the conversion daemon, and `npm prune --omit=dev` leaves production dependencies for runtime.
 
 ## 5. Replace Old PM2 Test Process
 
@@ -127,11 +128,21 @@ pm2 start services/api/dist/server.js --name videoblitzer-api --update-env
 pm2 save
 ```
 
+Start or restart the video worker daemon that processes `export_jobs`:
+
+```bash
+pm2 delete videoblitzer-video-worker 2>/dev/null || true
+pm2 start "npm run daemon --workspace @videoblitzer/video-worker" --name videoblitzer-video-worker --update-env
+pm2 save
+```
+
 Useful checks:
 
 ```bash
 pm2 logs videoblitzer-api
+pm2 logs videoblitzer-video-worker
 pm2 describe videoblitzer-api
+pm2 describe videoblitzer-video-worker
 ```
 
 The PM2 script path should be:
@@ -141,6 +152,12 @@ The PM2 script path should be:
 ```
 
 It should not point to the old test `server.js`.
+
+The worker process should show:
+
+```text
+VideoBlitzer video worker daemon polling every 5000ms
+```
 
 ## 6. Nginx Target
 
@@ -208,3 +225,11 @@ Expected authenticated shape:
 ```
 
 If either endpoint returns `VideoBlitzer API running`, PM2 is still running the old test server. Delete that PM2 process and start `services/api/dist/server.js` as shown above.
+
+To verify conversion processing end-to-end:
+
+1. Upload a WebM through the web app or desktop recorder.
+2. Confirm `export_jobs.status` changes from `queued` to `processing` to `completed`.
+3. Confirm the mirrored `jobs` row reaches `completed` with `progress=100`.
+4. Confirm the related `videos.conversion_status` becomes `completed`.
+5. Confirm the MP4 object exists in R2 under `exports/mp4/...`.

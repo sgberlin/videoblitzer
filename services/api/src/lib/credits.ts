@@ -1,5 +1,7 @@
 export const creditCosts = {
   upload_analyze_video: 10,
+  video_conversion_mp4: 5,
+  export_job: 15,
   highlight_export_3_min: 20,
   shorts_export: 15,
   commentary_cut: 25,

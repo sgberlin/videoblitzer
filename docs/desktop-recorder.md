@@ -71,6 +71,12 @@ Live marker buttons include Goal, Save, Foul, Key Moment, Start, End, and Custom
 
 The result screen shows local path, duration estimate, file size, audio status, marker count, upload progress, project link, and MP4 conversion status where available. Upload failures do not delete local files; retry upload after fixing network/API/auth issues.
 
+## Upload Retry And Resume Policy
+
+The MVP uses a retry-safe local-first fallback, not true multipart resume. Every recording is saved locally before upload, and recovered/combined files can be re-read from disk for another signed PUT attempt. If a network failure or cancellation occurs, the local file and manifest remain on disk; request a fresh signed URL and retry the upload from the beginning.
+
+True multipart resumable uploads remain a post-MVP requirement for very large files and unstable networks.
+
 ## Quick Clips
 
 FFmpeg-backed local clip buttons create 15/30/60 second clips or clips around the latest marker. Clips are saved locally as MP4. Sentence-aware editing rules are represented in metadata: preserve full spoken sentences when transcript timestamps are available, add 1-3 second handles, and warn if exact manual cuts may interrupt a sentence.
@@ -109,3 +115,49 @@ Status legend: `implemented` means code path exists; `manual` means requires OS/
 16. Confirm direct media URL import works - audit/metadata validation implemented; downloader not implemented.
 17. Confirm YouTube URL metadata-only behavior - implemented safe metadata-only response, no downloading.
 18. Confirm protected/DRM warning appears - implemented in UI.
+
+## Runtime QA Checklist For Release
+
+Do not mark a release production-ready until these tests are run on real devices:
+
+1. macOS screen recording: record full screen for 5 minutes, save locally, upload, confirm project video appears.
+2. macOS window recording: record a browser window for 5 minutes, verify no black frame unless source is protected.
+3. macOS system audio behavior: test with system audio off, requested, and with a known virtual audio path if needed; document whether audio is captured or blocked.
+4. Windows screen recording: record full screen for 5 minutes, save locally, upload, confirm project video appears.
+5. Windows window recording: record browser and app windows, verify source picker thumbnails and output.
+6. Windows system audio behavior: test full-screen and window capture with source audio; document supported/unsupported cases.
+7. 2+ hour recording: record at Studio quality, verify chunk manifest, final local file, disk usage, and no app crash.
+8. Crash recovery: force quit mid-recording, reopen, recover unfinished session, play recovered file.
+9. Recovered file upload: upload recovered file to a project, confirm signed URL, upload completion, analyze job, and conversion job if WebM.
+10. FFmpeg clipping: create 15/30/60 second clips and clip around marker; verify playback and audio sync.
+11. Video + audio combine: mux separate video/audio with positive and negative offsets; verify normalized MP4 output.
+12. Worker conversion: confirm `export_jobs` transitions queued -> processing -> completed and MP4 appears in R2.
+13. Failure path: temporarily break R2 or FFmpeg, confirm job status becomes failed and error is visible in admin jobs.
+
+## Mac Signing And Notarization Checklist
+
+1. Use Node 20+ on release machine.
+2. Install Apple Developer ID Application certificate in the login keychain.
+3. Set electron-builder notarization credentials (`APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, `APPLE_TEAM_ID`) or equivalent notarytool config.
+4. Verify `apps/desktop-recorder/build/entitlements.mac.plist` is included and hardened runtime stays enabled.
+5. Run `npm run package:mac --workspace apps/desktop-recorder`.
+6. Confirm both `VideoBlitzer-Recorder-mac-x64.dmg` and `VideoBlitzer-Recorder-mac-arm64.dmg` are signed and notarized.
+7. Download the DMG on a clean macOS account, launch it, and confirm Gatekeeper does not block it.
+8. Re-test Screen Recording and Microphone permission prompts after signing/notarization.
+
+## Worker Daemon
+
+MP4 conversion is processed by the video worker daemon:
+
+```bash
+npm run daemon --workspace services/video-worker
+```
+
+On the VPS, run it with PM2 after `npm ci`:
+
+```bash
+pm2 start "npm run daemon --workspace services/video-worker" --name videoblitzer-video-worker --update-env
+pm2 save
+```
+
+The worker requires `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` or `SUPABASE_SECRET_KEY`, `R2_ENDPOINT`, `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, and `R2_BUCKET_NAME`. It loads `/var/www/videoblitzer-api/.env` by default.

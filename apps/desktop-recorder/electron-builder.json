@@ -1,8 +1,22 @@
 {
   "appId": "com.videoblitzer.recorder",
   "productName": "VideoBlitzer Recorder",
-  "directories": { "output": "release" },
-  "files": ["dist/**/*", "package.json"],
-  "mac": { "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }], "artifactName": "VideoBlitzer-Recorder-mac.${ext}" },
-  "win": { "target": [{ "target": "nsis", "arch": ["x64"] }], "artifactName": "VideoBlitzer-Recorder-win.${ext}" }
+  "directories": { "output": "release", "buildResources": "build" },
+  "files": ["dist/**/*", "package.json", "build/**/*"],
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+    "artifactName": "VideoBlitzer-Recorder-mac-${arch}.${ext}",
+    "icon": "build/icon.png",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist"
+  },
+  "win": {
+    "target": [{ "target": "nsis", "arch": ["x64"] }],
+    "artifactName": "VideoBlitzer-Recorder-win-${arch}.${ext}",
+    "icon": "build/icon.ico",
+    "publisherName": "VideoBlitzer"
+  },
+  "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true }
 }

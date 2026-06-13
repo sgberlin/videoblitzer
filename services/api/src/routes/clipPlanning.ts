@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { createServiceClient } from "../supabase";
+import { userOwnsProject, userOwnsVideo } from "../lib/ownership";
 
 export const clipPlanningRouter = Router();
 clipPlanningRouter.use(requireAuth);
@@ -27,6 +28,12 @@ function sentenceBoundaries(segments: Array<z.infer<typeof transcriptSegmentSche
 
 clipPlanningRouter.post("/transcripts", async (req, res) => {
   const body = z.object({ projectId: z.string().uuid(), videoId: z.string().uuid().optional(), segments: z.array(transcriptSegmentSchema).max(5000) }).parse(req.body);
+  try {
+    if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
+    if (body.videoId && !await userOwnsVideo(req.user!.id, body.videoId)) return res.status(404).json({ error: "Video not found" });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : "Ownership check failed" });
+  }
   const boundaries = sentenceBoundaries(body.segments);
   const record = { id: crypto.randomUUID(), project_id: body.projectId, video_id: body.videoId, user_id: req.user!.id, segments: body.segments, sentence_boundaries: boundaries, status: "planned" };
   const supabase = createServiceClient();
@@ -40,6 +47,12 @@ clipPlanningRouter.post("/transcripts", async (req, res) => {
 clipPlanningRouter.post("/clips", async (req, res) => {
   const body = z.object({ projectId: z.string().uuid(), videoId: z.string().uuid().optional(), startSeconds: z.number(), endSeconds: z.number(), markerId: z.string().optional(), sourceSentenceIds: z.array(z.string()).default([]), manualOverride: z.boolean().default(false), metadata: z.record(z.string(), z.unknown()).optional() }).parse(req.body);
   if (body.endSeconds <= body.startSeconds) return res.status(400).json({ error: "Clip end must be after clip start." });
+  try {
+    if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
+    if (body.videoId && !await userOwnsVideo(req.user!.id, body.videoId)) return res.status(404).json({ error: "Video not found" });
+  } catch (error) {
+    return res.status(500).json({ error: error instanceof Error ? error.message : "Ownership check failed" });
+  }
   const clip = { id: crypto.randomUUID(), project_id: body.projectId, video_id: body.videoId, user_id: req.user!.id, start_seconds: body.startSeconds, end_seconds: body.endSeconds, duration_seconds: body.endSeconds - body.startSeconds, marker_id: body.markerId, source_sentence_ids: body.sourceSentenceIds, manual_override: body.manualOverride, metadata: body.metadata ?? {}, status: "planned" };
   const supabase = createServiceClient();
   if (supabase) {

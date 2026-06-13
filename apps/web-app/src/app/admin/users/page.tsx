@@ -1,1 +1,3 @@
-export default function AdminUsersPage() { return <section className="hero"><span className="pill">Owner only</span><h1>Allowed Users</h1><p className="muted">Add users, assign plans, grant unlimited access, suspend access, and keep private beta entry server-controlled.</p><div className="grid grid-2"><input className="input" placeholder="user@example.com" /><select className="input"><option>Starter Weekly</option><option>Creator Weekly</option><option>Pro Weekly</option><option>Owner Unlimited</option></select></div><br /><div className="tabs"><button className="button">Add allowed user</button><button className="button secondary">Grant unlimited access</button><button className="button secondary">Suspend user</button></div></section>; }
+import { AdminUsersClient } from "../AdminClients";
+
+export default function AdminUsersPage() { return <AdminUsersClient />; }

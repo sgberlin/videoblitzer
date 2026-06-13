@@ -5,12 +5,22 @@ import { uploadRateLimit } from "../middleware/rateLimit";
 import { createSignedUploadUrl } from "../lib/r2";
 import { createConversionJob } from "./exports";
 import { createServiceClient } from "../supabase";
+import { isExpectedRawUploadKey, userOwnsProject } from "../lib/ownership";
+import { enforceCredits } from "../lib/creditLedger";
 
 const allowedTypes = ["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"] as const;
+const sourceFormats = ["mp4", "mov", "mkv", "webm"] as const;
 const metadataSchema = z.record(z.string(), z.unknown()).optional();
 const markerSchema = z.array(z.record(z.string(), z.unknown())).max(500).optional();
 export const uploadsRouter = Router();
 uploadsRouter.use(requireAuth, uploadRateLimit);
+
+function sourceFormatForContentType(contentType: string): typeof sourceFormats[number] {
+  if (contentType === "video/quicktime") return "mov";
+  if (contentType === "video/x-matroska") return "mkv";
+  if (contentType === "video/webm") return "webm";
+  return "mp4";
+}
 
 uploadsRouter.post("/create-signed-url", async (req, res) => {
   const body = z.object({ filename: z.string().min(1), contentType: z.enum(allowedTypes), projectId: z.string().uuid() }).parse(req.body);
@@ -37,7 +47,7 @@ uploadsRouter.post("/complete", async (req, res) => {
     object_key: z.string().optional(),
     sizeBytes: z.number().optional(),
     size_bytes: z.number().optional(),
-    raw_format: z.literal("webm").optional(),
+    raw_format: z.enum(sourceFormats).optional(),
     desired_export_format: z.literal("mp4").optional(),
     recording_mode: z.string().max(80).optional(),
     source_type: z.string().max(80).optional(),
@@ -59,17 +69,29 @@ uploadsRouter.post("/complete", async (req, res) => {
   const storageKey = body.storageKey ?? body.object_key;
   const sizeBytes = body.sizeBytes ?? body.size_bytes;
   if (!projectId || !contentType || !storageKey) return res.status(400).json({ error: "project_id, object_key, and content_type are required" });
+  const ownsProject = await userOwnsProject(req.user!.id, projectId);
+  if (!ownsProject) return res.status(404).json({ error: "Project not found" });
+  if (!isExpectedRawUploadKey(req.user!.id, projectId, storageKey)) return res.status(400).json({ error: "Upload object key does not match the authenticated project." });
   const supabase = createServiceClient();
   const permissionConfirmedAt = body.permission_confirmed ? body.permission_confirmed_at ?? new Date().toISOString() : undefined;
-  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: body.raw_format ?? "webm", desired_export_format: body.desired_export_format ?? "mp4", size_bytes: sizeBytes, status: "uploaded", recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, duration_seconds: body.duration_seconds, conversion_status: (body.desired_export_format ?? "mp4") === "mp4" ? "queued" : "not_requested" };
+  const sourceFormat = body.raw_format ?? sourceFormatForContentType(contentType);
+  const desiredExportFormat = sourceFormat === "webm" ? body.desired_export_format ?? "mp4" : body.desired_export_format;
+  const needsMp4Conversion = sourceFormat === "webm" && desiredExportFormat === "mp4";
+  const creditResult = await enforceCredits({ userId: req.user!.id, projectId, action: "upload_analyze_video", isUnlimited: req.user!.isUnlimited, metadata: { filename: body.filename, sourceFormat, sizeBytes } });
+  if (!creditResult.ok) return res.status(402).json({ error: `Insufficient credits. Upload requires ${creditResult.cost} credits.`, code: "insufficient_credits", creditCost: creditResult.cost, balance: creditResult.balanceAfter });
+  if (needsMp4Conversion) {
+    const conversionCredit = await enforceCredits({ userId: req.user!.id, projectId, action: "video_conversion_mp4", isUnlimited: req.user!.isUnlimited, metadata: { filename: body.filename, sourceObjectKey: storageKey, sourceFormat } });
+    if (!conversionCredit.ok) return res.status(402).json({ error: `Insufficient credits. MP4 conversion requires ${conversionCredit.cost} credits.`, code: "insufficient_credits", creditCost: conversionCredit.cost, balance: conversionCredit.balanceAfter });
+  }
+  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: sourceFormat, desired_export_format: desiredExportFormat, size_bytes: sizeBytes, status: "uploaded", recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, duration_seconds: body.duration_seconds, conversion_status: needsMp4Conversion ? "queued" : "not_requested" };
   let conversionJob = null;
   if (supabase) {
     const { error } = await supabase.from("videos").insert(video);
     if (error) return res.status(500).json({ error: error.message });
     await supabase.from("projects").update({ status: "uploaded", updated_at: new Date().toISOString(), recording_mode: body.recording_mode, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, source_metadata: { sourceType: body.source_type, sourceLabel: body.source_label, sourceUrl: body.source_url }, import_metadata: body.import_metadata ?? {} }).eq("id", projectId).eq("owner_id", req.user!.id);
-    await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: projectId, event_name: "video_uploaded", metadata: { filename: body.filename, storageKey, sizeBytes, rawFormat: body.raw_format ?? "webm", markers: body.markers ?? [], recordingMode: body.recording_mode, permissionConfirmed: body.permission_confirmed ?? false } });
-    if ((body.desired_export_format ?? "mp4") === "mp4" && (body.raw_format ?? "webm") === "webm") {
-      conversionJob = await createConversionJob({ projectId, videoId: video.id, userId: req.user!.id, sourceObjectKey: storageKey, sourceFormat: "webm", targetFormat: "mp4" });
+    await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: projectId, event_name: "video_uploaded", metadata: { filename: body.filename, storageKey, sizeBytes, rawFormat: sourceFormat, markers: body.markers ?? [], recordingMode: body.recording_mode, permissionConfirmed: body.permission_confirmed ?? false } });
+    if (needsMp4Conversion) {
+      conversionJob = await createConversionJob({ projectId, videoId: video.id, userId: req.user!.id, sourceObjectKey: storageKey, sourceFormat: "webm", targetFormat: "mp4", skipCreditCheck: true });
     }
   }
   return res.status(201).json({ video, conversion_job: conversionJob });

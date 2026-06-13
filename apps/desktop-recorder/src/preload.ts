@@ -12,6 +12,7 @@ contextBridge.exposeInMainWorld("videoBlitzerRecorder", {
   selectOutputFolder: () => ipcRenderer.invoke("select-output-folder"),
   selectMediaFile: (kind: "video" | "audio" | "any") => ipcRenderer.invoke("select-media-file", kind),
   mediaMetadata: (filePath: string) => ipcRenderer.invoke("media-metadata", filePath),
+  readLocalFile: (filePath: string) => ipcRenderer.invoke("read-local-file", filePath),
   createClip: (input: ClipInput) => ipcRenderer.invoke("create-clip", input),
   combineVideoAudio: (input: CombineVideoAudioInput) => ipcRenderer.invoke("combine-video-audio", input),
   copyLocalFile: (sourcePath: string, outputFolder?: string) => ipcRenderer.invoke("copy-local-file", sourcePath, outputFolder),

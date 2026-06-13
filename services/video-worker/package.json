@@ -5,21 +5,23 @@
   "type": "module",
   "scripts": {
     "dev": "tsx src/index.ts",
+    "daemon": "tsx src/index.ts --daemon",
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "latest",
+    "@supabase/supabase-js": "^2.108.1",
     "@videoblitzer/export-presets": "file:../../packages/export-presets",
     "@videoblitzer/highlight-engine": "file:../../packages/highlight-engine",
     "@videoblitzer/shared-types": "file:../../packages/shared-types",
     "dotenv": "latest",
-    "zod": "latest",
-    "@aws-sdk/client-s3": "latest"
+    "zod": "latest"
   },
   "devDependencies": {
+    "@types/node": "^20.19.0",
     "tsx": "latest",
-    "typescript": "latest",
-    "@types/node": "^20.19.0"
+    "typescript": "latest"
   }
 }
