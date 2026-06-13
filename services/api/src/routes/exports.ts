@@ -2,8 +2,8 @@ import { Router } from "express";
 import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { createServiceClient } from "../supabase";
-import { userOwnsProject, userOwnsVideo } from "../lib/ownership";
-import { enforceCredits } from "../lib/creditLedger";
+import { getOwnedVideo, isExpectedRawUploadKey, userOwnsProject } from "../lib/ownership";
+import { enforceCredits, refundCredits } from "../lib/creditLedger";
 import { createSignedDownloadUrl } from "../lib/r2";
 
 export const exportsRouter = Router();
@@ -11,11 +11,14 @@ exportsRouter.use(requireAuth);
 
 export async function createConversionJob(input: { projectId: string; videoId?: string; userId: string; sourceObjectKey: string; sourceFormat: "webm"; targetFormat: "mp4"; skipCreditCheck?: boolean }) {
   const supabase = createServiceClient();
+  if (!supabase) throw new Error("Supabase service role is required.");
+  let chargedCost = 0;
   if (supabase && !input.skipCreditCheck) {
     const { data: profile, error: profileError } = await supabase.from("profiles").select("is_unlimited").eq("id", input.userId).maybeSingle();
     if (profileError) throw new Error(profileError.message);
     const creditResult = await enforceCredits({ userId: input.userId, projectId: input.projectId, action: "video_conversion_mp4", isUnlimited: Boolean(profile?.is_unlimited), metadata: { sourceObjectKey: input.sourceObjectKey, targetFormat: input.targetFormat } });
     if (!creditResult.ok) throw new Error(`Insufficient credits. MP4 conversion requires ${creditResult.cost} credits.`);
+    chargedCost = creditResult.cost;
   }
   const job = {
     id: crypto.randomUUID(),
@@ -29,10 +32,19 @@ export async function createConversionJob(input: { projectId: string; videoId?: 
     status: "queued",
   };
 
-  if (supabase) {
+  try {
     const { error } = await supabase.from("export_jobs").insert(job);
     if (error) throw new Error(error.message);
-    await supabase.from("jobs").insert({ id: job.id, project_id: input.projectId, user_id: input.userId, type: "convert_mp4", status: "queued", progress: 0, input: { sourceObjectKey: input.sourceObjectKey, targetObjectKey: job.target_object_key, sourceFormat: input.sourceFormat, targetFormat: input.targetFormat }, output: {} });
+    const { error: mirrorError } = await supabase.from("jobs").insert({ id: job.id, project_id: input.projectId, user_id: input.userId, type: "convert_mp4", status: "queued", progress: 0, input: { sourceObjectKey: input.sourceObjectKey, targetObjectKey: job.target_object_key, sourceFormat: input.sourceFormat, targetFormat: input.targetFormat }, output: {} });
+    if (mirrorError) throw new Error(mirrorError.message);
+  } catch (error) {
+    try {
+      await supabase.from("export_jobs").delete().eq("id", job.id).eq("status", "queued");
+    } catch {
+      // Best-effort cleanup; refund is more important if the queue insert was only partially durable.
+    }
+    if (chargedCost > 0) await refundCredits({ userId: input.userId, projectId: input.projectId, action: "video_conversion_mp4", cost: chargedCost, metadata: { reason: "conversion_queue_failed", sourceObjectKey: input.sourceObjectKey } }).catch(() => undefined);
+    throw error;
   }
 
   return job;
@@ -53,22 +65,26 @@ exportsRouter.post("/convert", async (req, res) => {
   }).parse(req.body);
 
   const projectId = body.projectId ?? body.project_id;
-  const sourceObjectKey = body.sourceObjectKey ?? body.source_object_key;
   const videoId = body.videoId ?? body.video_id;
-  if (!projectId || !sourceObjectKey) return res.status(400).json({ error: "project_id and source_object_key are required" });
+  if (!projectId || !videoId) return res.status(400).json({ error: "project_id and video_id are required" });
   try {
     if (!await userOwnsProject(req.user!.id, projectId)) return res.status(404).json({ error: "Project not found" });
-    if (videoId && !await userOwnsVideo(req.user!.id, videoId)) return res.status(404).json({ error: "Video not found" });
   } catch (error) {
-    return res.status(500).json({ error: error instanceof Error ? error.message : "Ownership check failed" });
+    return res.status(503).json({ error: error instanceof Error ? error.message : "Ownership check failed" });
   }
 
   const supabase = createServiceClient();
-  if (supabase) {
-    const { data, error } = await supabase.from("projects").select("id").eq("id", projectId).eq("owner_id", req.user!.id).maybeSingle();
-    if (error) return res.status(500).json({ error: error.message });
-    if (!data) return res.status(404).json({ error: "Project not found" });
+  if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
+  let video;
+  try {
+    video = await getOwnedVideo(req.user!.id, videoId);
+  } catch (error) {
+    return res.status(503).json({ error: error instanceof Error ? error.message : "Video ownership check failed" });
   }
+  if (!video || video.project_id !== projectId) return res.status(404).json({ error: "Video not found" });
+  if ((video.source_format ?? "").toLowerCase() !== "webm") return res.status(400).json({ error: "Only WebM videos can be queued for MP4 conversion.", code: "unsupported_conversion_source" });
+  const sourceObjectKey = video.source_object_key ?? video.storage_key;
+  if (!sourceObjectKey || !isExpectedRawUploadKey(req.user!.id, projectId, sourceObjectKey)) return res.status(400).json({ error: "Video source key does not match the authenticated project.", code: "invalid_video_source_key" });
 
   try {
     const job = await createConversionJob({ projectId, videoId, userId: req.user!.id, sourceObjectKey, sourceFormat: "webm", targetFormat: "mp4" });

@@ -1,4 +1,4 @@
-import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../config";
 
@@ -56,7 +56,18 @@ export async function createSignedDownloadUrl(objectKey: string) {
   return { objectKey, downloadUrl, expiresIn: 300, expiresAt: new Date(Date.now() + 300_000).toISOString(), mode: "signed_url" };
 }
 
-export async function readR2Usage(): Promise<R2UsageSummary> {
+export async function verifyR2Object(objectKey: string) {
+  const client = createR2Client();
+  if (!client) throw new Error("R2 object verification is not configured on the API server.");
+  try {
+    const response = await client.send(new HeadObjectCommand({ Bucket: config.R2_BUCKET_NAME, Key: objectKey }));
+    return { exists: true, sizeBytes: response.ContentLength ?? null, contentType: response.ContentType ?? null };
+  } catch {
+    return { exists: false, sizeBytes: null, contentType: null };
+  }
+}
+
+export async function readR2Usage(prefix?: string): Promise<R2UsageSummary> {
   const client = createR2Client();
   const summary: R2UsageSummary = {
     configured: Boolean(client),
@@ -75,7 +86,7 @@ export async function readR2Usage(): Promise<R2UsageSummary> {
   try {
     let continuationToken: string | undefined;
     do {
-      const response = await client.send(new ListObjectsV2Command({ Bucket: config.R2_BUCKET_NAME, ContinuationToken: continuationToken }));
+      const response = await client.send(new ListObjectsV2Command({ Bucket: config.R2_BUCKET_NAME, Prefix: prefix, ContinuationToken: continuationToken }));
       for (const object of response.Contents ?? []) {
         const key = object.Key ?? "";
         summary.totalObjects += 1;

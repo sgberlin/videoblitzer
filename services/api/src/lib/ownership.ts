@@ -10,7 +10,7 @@ export function isExpectedRawUploadKey(userId: string, projectId: string, object
 
 export async function userOwnsProject(userId: string, projectId: string) {
   const supabase = createServiceClient();
-  if (!supabase) return true;
+  if (!supabase) throw new Error("Supabase service role is required for ownership checks.");
   const { data, error } = await supabase.from("projects").select("id").eq("id", projectId).eq("owner_id", userId).maybeSingle();
   if (error) throw error;
   return Boolean(data);
@@ -18,8 +18,16 @@ export async function userOwnsProject(userId: string, projectId: string) {
 
 export async function userOwnsVideo(userId: string, videoId: string) {
   const supabase = createServiceClient();
-  if (!supabase) return true;
+  if (!supabase) throw new Error("Supabase service role is required for ownership checks.");
   const { data, error } = await supabase.from("videos").select("id").eq("id", videoId).eq("owner_id", userId).maybeSingle();
   if (error) throw error;
   return Boolean(data);
+}
+
+export async function getOwnedVideo(userId: string, videoId: string) {
+  const supabase = createServiceClient();
+  if (!supabase) throw new Error("Supabase service role is required for ownership checks.");
+  const { data, error } = await supabase.from("videos").select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type").eq("id", videoId).eq("owner_id", userId).maybeSingle();
+  if (error) throw error;
+  return data;
 }
