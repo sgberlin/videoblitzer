@@ -1,6 +1,6 @@
 {
   "appId": "com.videoblitzer.recorder",
-  "productName": "VideoBlitzer Recorder",
+  "productName": "VideoBlitzer Screen Recorder",
   "directories": { "output": "release", "buildResources": "build" },
   "files": ["dist/**/*", "package.json", "build/**/*"],
   "mac": {

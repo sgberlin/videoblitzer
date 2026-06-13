@@ -147,7 +147,7 @@ function createWindow() {
     height: 920,
     minWidth: 1080,
     minHeight: 760,
-    title: "VideoBlitzer Recorder",
+    title: "VideoBlitzer Screen Recorder",
     backgroundColor: "#061018",
     webPreferences: {
       preload: path.join(app.getAppPath(), "dist", "preload.js"),
@@ -218,7 +218,7 @@ app.whenReady().then(() => {
   ipcMain.handle("recover-session", (_event, manifest: RecordingManifest, outputFolder?: string) => recoverSession(manifest, outputFolder));
   ipcMain.handle("media-metadata", async (_event, filePath: string) => ({ durationSeconds: await ffprobeDuration(filePath) }));
   ipcMain.handle("read-local-file", async (_event, filePath: string) => {
-    if (!filePath || !existsSync(filePath) || !isAllowedPath(filePath)) throw new Error("Selected file does not exist or was not created by VideoBlitzer Recorder.");
+    if (!filePath || !existsSync(filePath) || !isAllowedPath(filePath)) throw new Error("Selected file does not exist or was not created by VideoBlitzer Screen Recorder.");
     const buffer = await readFile(filePath);
     const arrayBuffer = buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength);
     return { arrayBuffer, sizeBytes: buffer.byteLength };
@@ -255,7 +255,7 @@ app.whenReady().then(() => {
     return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
   });
   ipcMain.handle("copy-local-file", async (_event, sourcePath: string, outputFolder?: string) => {
-    if (!existsSync(sourcePath) || !isAllowedPath(sourcePath)) throw new Error("Selected file does not exist or was not selected through VideoBlitzer Recorder.");
+    if (!existsSync(sourcePath) || !isAllowedPath(sourcePath)) throw new Error("Selected file does not exist or was not selected through VideoBlitzer Screen Recorder.");
     const destinationFolder = outputFolder || app.getPath("videos");
     await mkdir(destinationFolder, { recursive: true });
     rememberFolder(destinationFolder);
@@ -265,7 +265,7 @@ app.whenReady().then(() => {
     return { filePath: destination, sizeBytes: (await stat(destination)).size };
   });
   ipcMain.handle("open-file-location", async (_event, filePath: string) => {
-    if (!filePath || !isAllowedPath(filePath)) throw new Error("File path is required and must be created or selected by VideoBlitzer Recorder.");
+    if (!filePath || !isAllowedPath(filePath)) throw new Error("File path is required and must be created or selected by VideoBlitzer Screen Recorder.");
     await shell.showItemInFolder(filePath);
     return { ok: true };
   });

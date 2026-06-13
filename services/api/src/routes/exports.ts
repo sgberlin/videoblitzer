@@ -4,6 +4,7 @@ import { requireAuth } from "../middleware/auth";
 import { createServiceClient } from "../supabase";
 import { userOwnsProject, userOwnsVideo } from "../lib/ownership";
 import { enforceCredits } from "../lib/creditLedger";
+import { createSignedDownloadUrl } from "../lib/r2";
 
 export const exportsRouter = Router();
 exportsRouter.use(requireAuth);
@@ -77,4 +78,16 @@ exportsRouter.post("/convert", async (req, res) => {
     const status = message.toLowerCase().includes("insufficient credits") ? 402 : 500;
     return res.status(status).json({ error: message, code: status === 402 ? "insufficient_credits" : "conversion_queue_failed" });
   }
+});
+
+exportsRouter.get("/:id/download", async (req, res) => {
+  const supabase = createServiceClient();
+  if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
+  const { data, error } = await supabase.from("export_jobs").select("*").eq("id", req.params.id).eq("user_id", req.user!.id).maybeSingle();
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Export job not found" });
+  if (data.status !== "completed" || !data.target_object_key) return res.status(409).json({ error: "MP4 conversion is not completed yet." });
+  const signed = await createSignedDownloadUrl(data.target_object_key);
+  if (!signed.downloadUrl) return res.status(503).json({ error: "R2 downloads are not configured.", signed });
+  return res.json(signed);
 });

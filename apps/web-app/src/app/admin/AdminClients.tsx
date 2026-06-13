@@ -6,7 +6,7 @@ import { apiFetch } from "../../lib/api";
 import { type AuthState, isInvalidLinkError, isPrivateBetaError, useAuthSession } from "../../lib/auth";
 
 type AdminUser = { email: string; role: string; plan_key: string; is_unlimited: boolean; status?: string; invited_at?: string };
-type AdminJob = { id: string; project_id?: string; type?: string; status: string; progress?: number; error?: string; error_message?: string; created_at?: string };
+type AdminJob = { id: string; project_id?: string; type?: string; status: string; progress?: number; error?: string; error_message?: string; created_at?: string; source_object_key?: string; target_object_key?: string; output?: Record<string, unknown>; input?: Record<string, unknown> };
 type CreditBalance = { user_id: string; balance: number; is_unlimited: boolean; updated_at?: string };
 type CreditTransaction = { id: string; user_id: string; action: string; amount: number; balance_after?: number; created_at?: string };
 
@@ -87,12 +87,25 @@ export function AdminUsersClient() {
 
 export function AdminJobsClient() {
   const state = useAdminData<{ jobs: AdminJob[]; exportJobs: AdminJob[] }>("/admin/jobs");
+  const worker = useAdminData<{ worker: { configured: boolean; expectedProcess?: string; note?: string }; queuedJobs: number; processingJobs: number; failedJobs: number; recentExportJobs: AdminJob[] }>("/admin/worker-status");
   async function retry(jobId: string, reload: () => Promise<void>) {
     if (!state.auth.session?.access_token) return;
     await apiFetch(`/admin/jobs/${jobId}/retry`, { method: "POST" }, state.auth.session.access_token);
     await reload();
   }
-  return <Guard state={state}>{(data, reload) => <section className="grid"><div className="hero"><span className="pill">Owner only</span><h1>Jobs</h1><p className="muted">Monitor queued, processing, completed, and failed jobs. Retry failed conversion jobs after fixing R2/FFmpeg issues.</p></div><div className="grid grid-2">{[...data.jobs, ...data.exportJobs.map((job) => ({ ...job, type: "export_job" }))].map((job) => <div className="card" key={`${job.type}-${job.id}`}><h3>{job.type ?? "job"} · {job.status}</h3><p className="muted">{job.id}</p><p>Progress: {job.progress ?? "--"}%</p>{(job.error || job.error_message) && <p className="warning">{job.error ?? job.error_message}</p>}<button className="button secondary" onClick={() => void retry(job.id, reload)}>Retry</button></div>)}</div></section>}</Guard>;
+  return <Guard state={state}>{(data, reload) => {
+    const allJobs = [...data.jobs, ...data.exportJobs.map((job) => ({ ...job, type: "export_job" }))];
+    const queued = allJobs.filter((job) => job.status === "queued").length;
+    const failed = allJobs.filter((job) => job.status === "failed").length;
+    return <section className="grid"><div className="hero"><span className="pill">Owner only</span><h1>Jobs And Worker Status</h1><p className="muted">Monitor worker queue health, queued jobs, failed jobs, R2 object keys, conversion output keys, and retry failed work.</p></div>
+      {worker.data && <div className="grid grid-3"><div className="card"><h3>Worker</h3><p>{worker.data.worker.configured ? "Queue API configured" : "Queue API unavailable"}</p><p className="muted">{worker.data.worker.expectedProcess ?? "videoblitzer-video-worker"}</p></div><div className="card"><h3>Queue</h3><p>{worker.data.queuedJobs} queued · {worker.data.processingJobs} processing</p></div><div className="card"><h3>Failures</h3><p className={worker.data.failedJobs ? "warning" : "status"}>{worker.data.failedJobs} failed export jobs</p></div></div>}
+      <div className="grid grid-3"><div className="card"><h3>Queued jobs</h3><p>{queued}</p></div><div className="card"><h3>Failed jobs</h3><p className={failed ? "warning" : "status"}>{failed}</p></div><div className="card"><h3>Total visible jobs</h3><p>{allJobs.length}</p></div></div>
+      <div className="grid grid-2">{allJobs.map((job) => {
+        const sourceKey = job.source_object_key ?? String(job.input?.sourceObjectKey ?? "");
+        const targetKey = job.target_object_key ?? String(job.input?.targetObjectKey ?? job.output?.targetObjectKey ?? "");
+        return <div className="card" key={`${job.type}-${job.id}`}><h3>{job.type ?? "job"} · {job.status}</h3><p className="muted">{job.id}</p><p>Progress: {job.progress ?? "--"}%</p>{sourceKey && <p><strong>R2 source key</strong><br /><span className="muted">{sourceKey}</span></p>}{targetKey && <p><strong>Conversion output key</strong><br /><span className="muted">{targetKey}</span></p>}{(job.error || job.error_message) && <p className="warning">{job.error ?? job.error_message}</p>}<button className="button secondary" onClick={() => void retry(job.id, reload)}>Retry job</button></div>;
+      })}</div></section>;
+  }}</Guard>;
 }
 
 export function AdminCreditsClient() {

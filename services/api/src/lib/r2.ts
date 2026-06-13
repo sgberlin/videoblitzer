@@ -1,4 +1,4 @@
-import { ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import { config } from "../config";
 
@@ -46,6 +46,14 @@ export async function createSignedUploadUrl(userId: string, projectId: string, f
   });
   const uploadUrl = await getSignedUrl(client, command, { expiresIn: 900 });
   return { key, objectKey: key, uploadUrl, signedUrl: uploadUrl, expiresIn: 900, expiresAt: new Date(Date.now() + 900_000).toISOString(), method: "PUT", requiredHeaders: { "Content-Type": contentType }, mode: "signed_url" };
+}
+
+export async function createSignedDownloadUrl(objectKey: string) {
+  const client = createR2Client();
+  if (!client) return { objectKey, downloadUrl: null, expiresIn: 300, mode: "configuration_required" };
+  const command = new GetObjectCommand({ Bucket: config.R2_BUCKET_NAME, Key: objectKey });
+  const downloadUrl = await getSignedUrl(client, command, { expiresIn: 300 });
+  return { objectKey, downloadUrl, expiresIn: 300, expiresAt: new Date(Date.now() + 300_000).toISOString(), mode: "signed_url" };
 }
 
 export async function readR2Usage(): Promise<R2UsageSummary> {

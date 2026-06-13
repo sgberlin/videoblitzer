@@ -64,6 +64,25 @@ adminRouter.get("/jobs", async (_req, res) => {
   return res.json({ jobs: jobs.data ?? [], exportJobs: exportJobs.data ?? [] });
 });
 
+adminRouter.get("/worker-status", async (_req, res) => {
+  const supabase = createServiceClient();
+  if (!supabase) return res.json({ worker: { configured: false }, queuedJobs: 0, processingJobs: 0, failedJobs: 0 });
+  const { data, error } = await supabase.from("export_jobs").select("id,status,error_message,created_at,source_object_key,target_object_key").order("created_at", { ascending: false }).limit(100);
+  if (error) return res.status(500).json({ error: error.message });
+  const jobs = data ?? [];
+  return res.json({
+    worker: {
+      configured: true,
+      expectedProcess: "videoblitzer-video-worker",
+      note: "PM2 liveness is checked on the VPS; this API view reflects database queue health.",
+    },
+    queuedJobs: jobs.filter((job) => job.status === "queued").length,
+    processingJobs: jobs.filter((job) => job.status === "processing").length,
+    failedJobs: jobs.filter((job) => job.status === "failed").length,
+    recentExportJobs: jobs,
+  });
+});
+
 adminRouter.post("/jobs/:id/retry", async (req, res) => {
   const supabase = createServiceClient();
   if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });

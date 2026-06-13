@@ -70,7 +70,7 @@ function filenameForMime(mime: string) {
     const base = teamA && teamB ? `${slug(teamA)}_vs_${slug(teamB)}` : "VideoBlitzer_Match";
     return `${base}_${stamp}.${extensionForMime(mime)}`;
   }
-  if (selectedMode === "browser") return `VideoBlitzer_BrowserRecording_${stamp}.${extensionForMime(mime)}`;
+  if (selectedMode === "browser") return `VideoBlitzer_ScreenCapture_${stamp}.${extensionForMime(mime)}`;
   return `VideoBlitzer_Recording_${stamp}.${extensionForMime(mime)}`;
 }
 function selectedToken() { return (el<HTMLTextAreaElement>("accessToken").value || "").trim(); }
@@ -94,6 +94,22 @@ function updateUploadProgress(value: number) {
 
 function safeApiError(body: string, fallback: string) {
   try { return (JSON.parse(body) as { error?: string }).error ?? fallback; } catch { return body || fallback; }
+}
+
+function friendlyCaptureError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Could not start capture.";
+  const lower = message.toLowerCase();
+  if (lower.includes("not enough disk space")) return `${message} Free disk space before starting another capture.`;
+  if (lower.includes("screen recording permission")) return message.replace("VideoBlitzer Recorder", "VideoBlitzer Screen Recorder");
+  if (lower.includes("permission") || lower.includes("denied")) return "Capture permission was blocked. Grant Screen Recording permission for VideoBlitzer Screen Recorder, then restart the app and try again.";
+  return message;
+}
+
+function friendlyUploadError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Upload failed.";
+  if (message.toLowerCase().includes("insufficient credits")) return `${message} Ask an owner to add credits or retry with owner unlimited mode.`;
+  if (message.toLowerCase().includes("conversion")) return `${message} The local recording is still saved; retry upload or check the project workspace for conversion status.`;
+  return `${message} The local file is still saved. You can retry upload after fixing network, auth, or API issues.`;
 }
 
 async function api<T>(path: string, init: RequestInit = {}) {
@@ -219,7 +235,7 @@ async function buildStream() {
 
   const displayStream = await navigator.mediaDevices.getUserMedia(videoConstraints).catch((error) => {
     if (navigator.userAgent.includes("Mac")) {
-      throw new Error("Screen recording permission is required. Enable it in System Settings → Privacy & Security → Screen Recording, then restart VideoBlitzer Recorder.");
+      throw new Error("Screen recording permission is required. Enable it in System Settings -> Privacy & Security -> Screen Recording, then restart VideoBlitzer Screen Recorder.");
     }
     throw new Error(`Could not capture the selected source: ${error instanceof Error ? error.message : "permission denied"}`);
   });
@@ -231,15 +247,15 @@ async function buildStream() {
       const mic = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
       tracks.push(...mic.getAudioTracks());
     } catch {
-      setText("uploadStatus", "Microphone permission failed. Continuing with screen video only.");
+      setText("uploadStatus", "Microphone permission was blocked or unavailable. Continuing with screen video only; enable microphone permission and retry if narration is required.");
     }
   }
   const finalStream = new MediaStream(tracks);
   const hasAudio = finalStream.getAudioTracks().length > 0;
   setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? (displayStream.getAudioTracks().length ? "System audio: detected" : "System audio: not detected") : "System audio: off");
   setText("audioStatus", hasAudio ? "Audio detected" : "No audio detected");
-  if (!hasAudio) setText("micWarning", "No audio was detected. Enable microphone, choose a supported source audio capture, or continue video-only.");
-  if (el<HTMLInputElement>("systemAudioToggle").checked && !displayStream.getAudioTracks().length && el<HTMLInputElement>("includeMic").checked) setText("micWarning", "Only microphone audio detected. System audio may be unavailable for this source or OS.");
+  if (!hasAudio) setText("micWarning", "No audio was detected. On macOS, use a source that exposes audio or a virtual audio device. On Windows, try full-screen capture or another source. You can continue video-only.");
+  if (el<HTMLInputElement>("systemAudioToggle").checked && !displayStream.getAudioTracks().length && el<HTMLInputElement>("includeMic").checked) setText("micWarning", "Only microphone audio detected. System audio may be unavailable for this source, operating system, or protected content.");
   return finalStream;
 }
 
@@ -277,7 +293,7 @@ async function startRecording() {
     setStatus("Recording");
   } catch (error) {
     setStatus("Idle");
-    setText("uploadStatus", error instanceof Error ? error.message : "Could not start recording.");
+    setText("uploadStatus", friendlyCaptureError(error));
   }
 }
 
@@ -308,7 +324,7 @@ async function finishRecording() {
   const playback = el<HTMLVideoElement>("playback");
   playback.src = URL.createObjectURL(blob);
   setStatus("Saved locally");
-  setText("uploadStatus", `Saved ${fileName}. Ready to upload.`);
+  setText("uploadStatus", `Saved ${fileName} locally. Upload after recording when ready.`);
   el<HTMLButtonElement>("openLocation").disabled = false;
   el<HTMLButtonElement>("uploadRecording").disabled = false;
   el<HTMLButtonElement>("exportMp4").disabled = false;
@@ -327,9 +343,9 @@ function uploadToSignedUrl(blob: Blob, signedUrl: string, requiredHeaders: Recor
     const headerValue = requiredHeaders?.["Content-Type"] ?? blob.type;
     if (headerValue) xhr.setRequestHeader("Content-Type", headerValue);
     xhr.upload.onprogress = (event) => { if (event.lengthComputable) onProgress(Math.round((event.loaded / event.total) * 100)); };
-    xhr.onload = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`R2 upload failed with status ${xhr.status}`)); };
+    xhr.onload = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; xhr.status >= 200 && xhr.status < 300 ? resolve() : reject(new Error(`Upload to R2 failed with status ${xhr.status}.`)); };
     xhr.onabort = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; reject(new Error("Upload cancelled. Local file is still available and can be retried.")); };
-    xhr.onerror = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; reject(new Error("R2 upload failed. Check your connection and try again.")); };
+    xhr.onerror = () => { activeUploadXhr = null; el<HTMLButtonElement>("cancelUpload").disabled = true; reject(new Error("Upload failed. Check your connection and try again.")); };
     xhr.send(blob);
   });
 }
@@ -374,7 +390,7 @@ async function uploadRecording() {
   } catch (error) {
     if (activeManifest) { activeManifest.uploadStatus = "failed"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setStatus("Upload failed");
-    setText("uploadStatus", error instanceof Error ? error.message : "Upload failed.");
+    setText("uploadStatus", friendlyUploadError(error));
   }
 }
 
@@ -837,7 +853,8 @@ function pauseOrResume() {
 function selectMode(mode: string) {
   selectedMode = mode;
   const label = mode.replace(/-/g, " ").replace(/^./, (char) => char.toUpperCase());
-  setText("selectedModeLabel", label === "Sports" ? "Sports Commentary" : label);
+  const modeLabels: Record<string, string> = { browser: "Record Browser or App Window", match: "Capture Match Video", screen: "Screen Walkthrough", business: "Business Demo", training: "Training Video", upload: "Upload Existing Video" };
+  setText("selectedModeLabel", modeLabels[mode] ?? label);
   document.querySelectorAll(".mode-card").forEach((card) => card.classList.toggle("selected", (card as HTMLElement).dataset.mode === mode));
   renderMarkerButtons();
 }

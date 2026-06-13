@@ -133,7 +133,7 @@ export function DashboardClient() {
   if (auth.status === "loading" || loading) return <AuthStatusMessage status="loading" />;
   if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
   if (error) {
-    return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><p className="muted">The API is reachable, but the dashboard data could not be loaded.</p><div className="card"><h3>Temporary auth diagnostics</h3><pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(diagnostics, null, 2)}</pre></div><a className="button" href="/login">Back to login</a></section>;
+    return <section className="hero"><h1>Dashboard unavailable</h1><p className="warning">{error}</p><p className="muted">The API is reachable, but the dashboard data could not be loaded. Refresh once or sign in again if this persists.</p>{process.env.NODE_ENV !== "production" && <div className="card"><h3>Auth diagnostics</h3><pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(diagnostics, null, 2)}</pre></div>}<a className="button" href="/login">Back to login</a></section>;
   }
   if (!data) return null;
 
@@ -142,7 +142,8 @@ export function DashboardClient() {
       {data.profile.isOwner && <OwnerModeBadge />}
       <h1>VideoBlitzer dashboard</h1>
       <p className="muted">Signed in as {data.profile.email}. Server-side access is enforced by the API before any project, job, or storage data is returned.</p>
-      <div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><a className="button secondary" href="/desktop-recorder">Download Desktop Recorder</a></div>
+      <p className="muted">Use the recorder to capture browser video, online matches, app windows, or your full screen.</p>
+      <div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><a className="button secondary" href="/capture-screen-video">Download Screen Recorder</a></div>
       <CreditBadge credits={data.creditBalance} />
     </section>
     <br />
