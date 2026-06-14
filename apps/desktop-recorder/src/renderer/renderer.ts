@@ -2,6 +2,7 @@ import type { RecorderSettings, RecorderSource, SaveRecordingResult, RecordingMa
 
 const preferredMimes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_000 } as const;
+const recordingTimesliceMs = 5_000;
 
 let sources: RecorderSource[] = [];
 let selectedSource: RecorderSource | null = null;
@@ -17,7 +18,7 @@ let timerInterval: number | undefined;
 let lastBlob: Blob | null = null;
 let savedFile: SaveRecordingResult | null = null;
 let selectedMime = "video/webm";
-let selectedMode = "browser";
+let selectedMode = "screen";
 let sourceFilter: "screen" | "window" | "browser" = "screen";
 let markers: Array<{ time: string; label: string; note: string; seconds?: number; createdAt?: string }> = [];
 let activeManifest: RecordingManifest | null = null;
@@ -59,6 +60,13 @@ let previewStream: MediaStream | null = null;
 let previewHealthInterval: number | undefined;
 let recordingHealthInterval: number | undefined;
 let captureAudioContext: AudioContext | null = null;
+let recordingAudioContext: AudioContext | null = null;
+let recordingAudioInterval: number | undefined;
+let playbackAudioContext: AudioContext | null = null;
+let playbackAudioInterval: number | undefined;
+let playbackAudioSourceAttached = false;
+let lastVideoChunkAt = 0;
+let lastVideoChunkBytes = 0;
 
 function bridge() {
   return window.videoBlitzerRecorder;
@@ -220,6 +228,10 @@ function startHealthMonitor(kind: "preview" | "recording", video: HTMLVideoEleme
         : signal.brightness > 8 || signal.contrast > 4
           ? `video signal ok (${Math.round(signal.brightness)} brightness)`
           : "video signal is very dark";
+      if (kind === "recording") {
+        const signalPercent = signal.ready ? Math.max(0, Math.min(100, signal.brightness > 8 || signal.contrast > 4 ? Math.max(30, signal.contrast * 4) : signal.brightness)) : 0;
+        updateMeter("videoSignalBar", "videoSignalMeter", signalPercent, signal.ready ? `${Math.round(signal.brightness)} brightness` : "starting");
+      }
       let audioStatus = audioTracks.length ? `${audioTracks.length} audio track(s)` : "no audio track";
       if (analyser && audioData) {
         analyser.getByteFrequencyData(audioData);
@@ -260,6 +272,82 @@ function updateTimer() {
 function updateUploadProgress(value: number) {
   el<HTMLDivElement>("uploadBar").style.width = `${value}%`;
   setText("uploadPercent", `${value}%`);
+}
+
+function updateMeter(barId: string, labelId: string, value: number, label: string) {
+  el<HTMLElement>(barId).style.width = `${Math.max(0, Math.min(100, Math.round(value)))}%`;
+  setText(labelId, label);
+}
+
+function audioLevelFromAnalyser(analyser: AnalyserNode, data: Uint8Array<ArrayBuffer>) {
+  analyser.getByteFrequencyData(data);
+  return data.reduce((sum, value) => sum + value, 0) / Math.max(data.length, 1);
+}
+
+function resetRecordingMeters() {
+  lastVideoChunkAt = performance.now();
+  lastVideoChunkBytes = 0;
+  updateMeter("videoBitrateBar", "videoBitrateMeter", 0, "0.0 Mbps");
+  updateMeter("videoSignalBar", "videoSignalMeter", 0, "waiting");
+  updateMeter("recordingAudioBar", "recordingAudioMeter", 0, "no signal");
+}
+
+function stopRecordingAudioMeter() {
+  if (recordingAudioInterval) window.clearInterval(recordingAudioInterval);
+  recordingAudioInterval = undefined;
+  recordingAudioContext?.close().catch(() => undefined);
+  recordingAudioContext = null;
+}
+
+function startRecordingAudioMeter(inputStream: MediaStream | null) {
+  stopRecordingAudioMeter();
+  if (!inputStream?.getAudioTracks().length) {
+    updateMeter("recordingAudioBar", "recordingAudioMeter", 0, "no audio track");
+    return;
+  }
+  recordingAudioContext = new AudioContext();
+  const analyser = recordingAudioContext.createAnalyser();
+  analyser.fftSize = 256;
+  recordingAudioContext.createMediaStreamSource(new MediaStream(inputStream.getAudioTracks())).connect(analyser);
+  const data = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+  recordingAudioInterval = window.setInterval(() => {
+    const level = audioLevelFromAnalyser(analyser, data);
+    updateMeter("recordingAudioBar", "recordingAudioMeter", Math.min(100, (level / 128) * 100), level > 2 ? `${Math.round(level)} level` : "low signal");
+  }, 160);
+}
+
+function startPlaybackMeter() {
+  const playback = el<HTMLVideoElement>("playback");
+  if (playbackAudioSourceAttached) return;
+  try {
+    playbackAudioContext = new AudioContext();
+    const analyser = playbackAudioContext.createAnalyser();
+    analyser.fftSize = 256;
+    playbackAudioContext.createMediaElementSource(playback).connect(analyser);
+    analyser.connect(playbackAudioContext.destination);
+    const data = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+    playbackAudioSourceAttached = true;
+    playback.addEventListener("play", () => {
+      void playbackAudioContext?.resume();
+      if (playbackAudioInterval) window.clearInterval(playbackAudioInterval);
+      playbackAudioInterval = window.setInterval(() => {
+        const level = audioLevelFromAnalyser(analyser, data);
+        updateMeter("playbackAudioBar", "playbackAudioMeter", Math.min(100, (level / 128) * 100), level > 2 ? `${Math.round(level)} level` : "low signal");
+      }, 160);
+    });
+    playback.addEventListener("pause", () => {
+      if (playbackAudioInterval) window.clearInterval(playbackAudioInterval);
+      playbackAudioInterval = undefined;
+      updateMeter("playbackAudioBar", "playbackAudioMeter", 0, "paused");
+    });
+    playback.addEventListener("ended", () => {
+      if (playbackAudioInterval) window.clearInterval(playbackAudioInterval);
+      playbackAudioInterval = undefined;
+      updateMeter("playbackAudioBar", "playbackAudioMeter", 0, "ended");
+    });
+  } catch (error) {
+    setText("playbackAudioMeter", error instanceof Error ? "meter unavailable" : "meter unavailable");
+  }
 }
 
 function updatePackageSummary() {
@@ -477,8 +565,10 @@ async function refreshSources() {
     list.appendChild(card);
   }
   if (!visibleSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "screen" ? "screens" : sourceFilter === "browser" ? "browser windows" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
+  const preferredScreen = sourceFilter === "screen" ? visibleSources.find((source) => source.id.startsWith("screen")) : null;
   const onlySource = visibleSources[0];
-  if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
+  if (preferredScreen && (!selectedSource || !selectedSource.id.startsWith("screen"))) selectSource(preferredScreen);
+  else if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
   setStatus(visibleSources.length ? "Source selected" : "Idle");
 }
 
@@ -492,6 +582,13 @@ function selectSource(source: RecorderSource) {
   el("previewPlaceholder").textContent = "Starting live preview...";
   setStatus("Source selected");
   void startSourcePreview();
+}
+
+function selectStableScreenSource() {
+  const screenSource = selectedSource?.id.startsWith("screen") ? selectedSource : sources.find((source) => source.id.startsWith("screen"));
+  if (!screenSource) throw new Error("No screen source is available. Refresh Sources and grant Screen Recording permission if prompted.");
+  if (selectedSource?.id !== screenSource.id) selectSource(screenSource);
+  return screenSource;
 }
 
 async function startSourcePreview() {
@@ -525,6 +622,7 @@ async function startSourcePreview() {
 
 async function buildVideoStream() {
   if (!selectedSource) throw new Error("Select a screen or window before recording.");
+  const captureSource = selectedMode === "screen" ? selectStableScreenSource() : selectedSource;
   const resolution = el<HTMLSelectElement>("resolution").value;
   const resolutionConstraints: Record<string, number> = resolution === "720p" ? { maxWidth: 1280, maxHeight: 720 } : resolution === "1080p" ? { maxWidth: 1920, maxHeight: 1080 } : resolution === "1440p" ? { maxWidth: 2560, maxHeight: 1440 } : resolution === "2160p" ? { maxWidth: 3840, maxHeight: 2160 } : {};
   const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
@@ -533,7 +631,7 @@ async function buildVideoStream() {
     video: {
       mandatory: {
         chromeMediaSource: "desktop",
-        chromeMediaSourceId: selectedSource.id,
+        chromeMediaSourceId: captureSource.id,
         maxFrameRate: frameRate,
         ...resolutionConstraints,
       },
@@ -606,8 +704,9 @@ async function enableMicrophoneMonitoring() {
 async function startRecording() {
   try {
     if (!el<HTMLInputElement>("permissionConfirm").checked) throw new Error("Confirm that you are authorized to record this content before starting.");
-    if (!settings.outputFolder) throw new Error("Choose and save an output folder before recording so local files are recoverable.");
     await saveSettings();
+    if (selectedMode === "screen" && !sources.some((source) => source.id.startsWith("screen"))) await refreshSources();
+    if (selectedMode === "screen") selectStableScreenSource();
     stopPreviewStream();
     stopMicMeter();
     stream = await buildVideoStream();
@@ -622,6 +721,8 @@ async function startRecording() {
     await recordingPreview.play().catch(() => undefined);
     el("preview").parentElement?.classList.add("has-video");
     startHealthMonitor("recording", recordingPreview, stream, "recordingHealthStatus");
+    resetRecordingMeters();
+    startRecordingAudioMeter(audioStream);
     chunks = [];
     chunkSaveChain = Promise.resolve();
     audioChunkSaveChain = Promise.resolve();
@@ -640,7 +741,10 @@ async function startRecording() {
     const quality = el<HTMLSelectElement>("quality").value as keyof typeof qualityBitrates;
     recorder = new MediaRecorder(stream, { mimeType: selectedMime, videoBitsPerSecond: qualityBitrates[quality] });
     recorder.ondataavailable = (event) => {
-      if (event.data.size) chunkSaveChain = chunkSaveChain.then(() => saveChunk(event.data));
+      if (event.data.size) {
+        updateVideoBitrate(event.data.size);
+        chunkSaveChain = chunkSaveChain.then(() => saveChunk(event.data));
+      }
     };
     recorder.onstop = () => void finishRecording();
     if (audioStream && activeAudioManifest) {
@@ -651,8 +755,8 @@ async function startRecording() {
       };
     }
     startedAt = Date.now();
-    recorder.start(30_000);
-    audioRecorder?.start(30_000);
+    recorder.start(recordingTimesliceMs);
+    audioRecorder?.start(recordingTimesliceMs);
     markers = [];
     renderMarkers();
     timerInterval = window.setInterval(updateTimer, 500);
@@ -685,6 +789,7 @@ async function finishRecording() {
     timerInterval = undefined;
     stopMicMeter();
     stopHealthMonitor("recording");
+    stopRecordingAudioMeter();
     setText("recordingHealthStatus", "Recording health: finalized.");
     el("recBadge").classList.remove("active");
     stream?.getTracks().forEach((track) => track.stop());
@@ -729,6 +834,7 @@ async function finishRecording() {
   } catch (error) {
     setStatus("Save failed");
     stopHealthMonitor("recording");
+    stopRecordingAudioMeter();
     audioStream?.getTracks().forEach((track) => track.stop());
     audioStream = null;
     setText("uploadStatus", error instanceof Error ? `Could not finalize recording: ${error.message}. Use crash recovery to recover saved chunks.` : "Could not finalize recording. Use crash recovery to recover saved chunks.");
@@ -760,7 +866,7 @@ async function uploadRecording() {
     if (activeManifest) { activeManifest.uploadStatus = "uploading"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setText("uploadStatus", "Creating or selecting VideoBlitzer project...");
     const metadata = collectMetadata();
-    const title = metadata.matchMetadata.matchTitle || (selectedMode === "match" ? `${metadata.matchMetadata.teamA || "Team A"} vs ${metadata.matchMetadata.teamB || "Team B"}` : `Browser recording ${timestamp()}`);
+    const title = metadata.matchMetadata.matchTitle || (selectedMode === "match" ? `${metadata.matchMetadata.teamA || "Team A"} vs ${metadata.matchMetadata.teamB || "Team B"}` : `Screen recording ${timestamp()}`);
     const existingProjectId = el<HTMLInputElement>("existingProjectId").value.trim();
     const created = existingProjectId ? { project: { id: existingProjectId, title } } : await api<{ project: { id: string; title: string } }>("/projects", { method: "POST", body: JSON.stringify({ title, source_type: "desktop_recorder", recording_mode: selectedMode, source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, source_metadata: { sourceLabel: selectedSource?.name, sourcePlatform: metadata.matchMetadata.sourcePlatform } }) });
     setText("projectId", created.project.id);
@@ -1086,7 +1192,7 @@ async function saveChunk(blob: Blob) {
   if (!activeManifest) return;
   const index = ++chunkIndex;
   try {
-    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeManifest.sessionId}_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: 30 });
+    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeManifest.sessionId}_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: recordingTimesliceMs / 1000 });
     activeManifest.chunks.push(chunk);
     activeManifest.markers = markers;
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
@@ -1099,11 +1205,21 @@ async function saveChunk(blob: Blob) {
   }
 }
 
+function updateVideoBitrate(bytes: number) {
+  const now = performance.now();
+  const elapsedSeconds = Math.max((now - lastVideoChunkAt) / 1000, recordingTimesliceMs / 1000);
+  const bitsPerSecond = ((bytes + lastVideoChunkBytes) * 8) / elapsedSeconds;
+  lastVideoChunkAt = now;
+  lastVideoChunkBytes = 0;
+  const mbps = bitsPerSecond / 1_000_000;
+  updateMeter("videoBitrateBar", "videoBitrateMeter", Math.min(100, (mbps / 16) * 100), `${mbps.toFixed(1)} Mbps`);
+}
+
 async function saveAudioChunk(blob: Blob) {
   if (!activeAudioManifest) return;
   const index = ++audioChunkIndex;
   try {
-    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeAudioManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeAudioManifest.sessionId}_audio_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: 30 });
+    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeAudioManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeAudioManifest.sessionId}_audio_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: recordingTimesliceMs / 1000 });
     activeAudioManifest.chunks.push(chunk);
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
   } catch (error) {
@@ -1350,9 +1466,16 @@ function pauseOrResume() {
 function selectMode(mode: string) {
   selectedMode = mode;
   const label = mode.replace(/-/g, " ").replace(/^./, (char) => char.toUpperCase());
-  const modeLabels: Record<string, string> = { browser: "Record Browser or App Window", match: "Capture Match Video", screen: "Screen Walkthrough", business: "Business Demo", training: "Training Video", upload: "Upload Existing Video" };
+  const modeLabels: Record<string, string> = { screen: "Full-Screen Capture", browser: "Browser or App Window", match: "Capture Match Video", business: "Business Demo", training: "Training Video", upload: "Upload Existing Video" };
   setText("selectedModeLabel", modeLabels[mode] ?? label);
   document.querySelectorAll(".mode-card").forEach((card) => card.classList.toggle("selected", (card as HTMLElement).dataset.mode === mode));
+  if (mode === "screen") {
+    sourceFilter = "screen";
+    el("screenTab").classList.add("active");
+    el("windowTab").classList.remove("active");
+    el("browserTab").classList.remove("active");
+    void refreshSources();
+  }
   renderMarkerButtons();
 }
 
@@ -1459,6 +1582,7 @@ async function init() {
     const link = el("projectLink").querySelector("a") as HTMLAnchorElement | null;
     if (link?.href && bridgeAvailable) void bridge().openExternal(link.href);
   });
+  startPlaybackMeter();
   el("selectFolder").addEventListener("click", async () => { if (!bridgeAvailable) { setText("outputFolder", "Electron bridge unavailable."); return; } const folder = await bridge().selectOutputFolder(); if (folder) { settings.outputFolder = folder; setText("outputFolder", folder); await saveSettings(); } });
   el("saveRecorderSettings").addEventListener("click", () => void saveSettings().then(testConnection));
   el("testConnection").addEventListener("click", () => void testConnection());
@@ -1485,7 +1609,7 @@ async function init() {
     lastConnectionResult = error instanceof Error ? error.message : "API check failed";
     updateDiagnostics();
   });
-  selectMode((document.querySelector(".mode-card.selected") as HTMLElement | null)?.dataset.mode ?? "browser");
+  selectMode((document.querySelector(".mode-card.selected") as HTMLElement | null)?.dataset.mode ?? "screen");
   renderMarkerButtons();
   renderRecentRecordings();
   await populateMicrophones().catch((error) => {

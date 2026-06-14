@@ -115,15 +115,13 @@ async function readSettings(): Promise<RecorderSettings> {
     const raw = JSON.parse(await readFile(userConfigPath(), "utf8")) as RecorderSettings;
     for (const root of raw.outputRoots ?? []) rememberFolder(root);
     if (raw.outputFolder) rememberFolder(raw.outputFolder);
-    let token: string | undefined;
     let tokenStorageMode: RecorderSettings["tokenStorageMode"] = "session_only";
-    if (raw.rememberToken && raw.tokenEncrypted && safeStorage.isEncryptionAvailable()) {
-      token = safeStorage.decryptString(Buffer.from(raw.tokenEncrypted, "base64"));
-      tokenStorageMode = "keychain";
-    } else if (raw.rememberToken && raw.tokenEncrypted) {
-      tokenStorageMode = "unavailable";
+    if (raw.rememberToken && raw.tokenEncrypted) {
+      tokenStorageMode = safeStorage.isEncryptionAvailable() ? "keychain" : "unavailable";
     }
-    return { ...defaultSettings, ...raw, token, tokenEncrypted: undefined, tokenStorageMode };
+    // Do not decrypt the remembered token during startup. macOS shows a Keychain
+    // prompt for decryptString, which feels like a permission prompt on every launch.
+    return { ...defaultSettings, ...raw, rememberToken: false, token: undefined, tokenEncrypted: undefined, tokenStorageMode };
   } catch {
     return defaultSettings;
   }
@@ -550,10 +548,11 @@ app.whenReady().then(() => {
     await mkdir(outputFolder, { recursive: true });
     rememberFolder(outputFolder);
     const outputPath = await uniqueFilePath(outputFolder, input.filename);
+    const audioFilter = "aresample=async=1:first_pts=0,loudnorm=I=-16:TP=-1.5:LRA=11";
     const offsetArgs = input.offsetSeconds >= 0 ? ["-itsoffset", String(input.offsetSeconds), "-i", input.audioPath] : ["-i", input.audioPath, "-itsoffset", String(Math.abs(input.offsetSeconds))];
     const args = input.offsetSeconds >= 0
-      ? ["-y", "-i", input.videoPath, ...offsetArgs, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", "aresample=async=1:first_pts=0", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath]
-      : ["-y", ...offsetArgs, "-i", input.videoPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", "aresample=async=1:first_pts=0", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath];
+      ? ["-y", "-i", input.videoPath, ...offsetArgs, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", audioFilter, ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath]
+      : ["-y", ...offsetArgs, "-i", input.videoPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", audioFilter, ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath];
     await runCommand(ffmpegPath, args);
     rememberPath(outputPath);
     return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
