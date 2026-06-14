@@ -15,6 +15,7 @@ async function gitShortSha() {
 
 await mkdir("dist/renderer", { recursive: true });
 await cp("src/renderer/index.html", "dist/renderer/index.html");
+await cp("src/renderer/crop-overlay.html", "dist/renderer/crop-overlay.html");
 await cp("src/renderer/styles.css", "dist/renderer/styles.css");
 const rendererJsPath = "dist/renderer/renderer.js";
 const rendererJs = await readFile(rendererJsPath, "utf8");

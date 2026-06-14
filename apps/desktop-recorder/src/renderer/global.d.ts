@@ -1,4 +1,4 @@
-import type { ClipInput, CombineVideoAudioInput, MediaMetadata, RecorderSettings, RecorderSource, RecordingChunkRecord, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingResult } from "../types";
+import type { ClipInput, CombineVideoAudioInput, CropOverlayState, MediaMetadata, RecorderSettings, RecorderSource, RecordingChunkRecord, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingResult } from "../types";
 
 declare global {
   interface Window {
@@ -8,6 +8,11 @@ declare global {
       secureStorageStatus(): Promise<{ encryptionAvailable: boolean }>;
       microphonePermissionStatus(): Promise<{ status: string }>;
       requestMicrophonePermission(): Promise<{ granted: boolean; status: string }>;
+      showCropOverlay(aspect: CropOverlayState["aspect"]): Promise<CropOverlayState>;
+      hideCropOverlay(): Promise<CropOverlayState>;
+      lockCropOverlay(locked: boolean): Promise<CropOverlayState>;
+      getCropOverlayState(): Promise<CropOverlayState>;
+      onCropOverlayState(callback: (state: CropOverlayState) => void): () => void;
       saveRecording(arrayBuffer: ArrayBuffer, filename: string, outputFolder?: string): Promise<SaveRecordingResult>;
       saveRecordingChunk(input: SaveChunkInput): Promise<RecordingChunkRecord>;
       saveManifest(input: SaveManifestInput): Promise<{ ok: true; manifestPath: string }>;

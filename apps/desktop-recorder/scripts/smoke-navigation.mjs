@@ -36,6 +36,9 @@ for (const id of [
   "downloadPackagePanel",
   "openLocation",
   "openProjectFromPackage",
+  "showCropOverlay",
+  "lockCropOverlay",
+  "hideCropOverlay",
   "recentRecordings",
 ]) {
   assert(hasId(id), `Missing DOM element #${id}`);

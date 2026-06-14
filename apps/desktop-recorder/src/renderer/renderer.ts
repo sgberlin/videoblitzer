@@ -1,14 +1,10 @@
-import type { RecorderSettings, RecorderSource, SaveRecordingResult, RecordingManifest, RecordingChunkRecord } from "../types";
+import type { CropOverlayState, RecorderSettings, RecorderSource, SaveRecordingResult, RecordingManifest, RecordingChunkRecord } from "../types";
 
 const preferredMimes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_000 } as const;
 const recordingTimesliceMs = 5_000;
-const stableScreenSource: RecorderSource = {
-  id: "screen:0:0",
-  name: "Full screen display",
-  thumbnail: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='180' viewBox='0 0 320 180'%3E%3Crect width='320' height='180' rx='20' fill='%23030a18'/%3E%3Crect x='34' y='28' width='252' height='124' rx='12' fill='%23111c35' stroke='%238b5cf6'/%3E%3Ctext x='160' y='96' fill='%23e5e7eb' font-family='Arial' font-size='18' text-anchor='middle'%3EFull screen%3C/text%3E%3C/svg%3E",
-  kind: "screen",
-};
+type CaptureAspect = "source" | "16:9" | "4:3" | "9:16";
+interface CropRect { x: number; y: number; width: number; height: number; }
 
 let sources: RecorderSource[] = [];
 let selectedSource: RecorderSource | null = null;
@@ -65,6 +61,15 @@ let micAudioContext: AudioContext | null = null;
 let previewStream: MediaStream | null = null;
 let previewHealthInterval: number | undefined;
 let recordingHealthInterval: number | undefined;
+let sourceRetryTimeout: number | undefined;
+let sourceVideoStream: MediaStream | null = null;
+let formattedVideoCleanup: (() => void) | null = null;
+let cropRect: CropRect | null = null;
+let cropDrag:
+  | { mode: "move"; startX: number; startY: number; startRect: CropRect }
+  | { mode: "resize"; handle: string; startX: number; startY: number; startRect: CropRect }
+  | null = null;
+let cropOverlayLocked = false;
 let captureAudioContext: AudioContext | null = null;
 let recordingAudioContext: AudioContext | null = null;
 let recordingAudioInterval: number | undefined;
@@ -177,6 +182,7 @@ function stopPreviewStream() {
   stopHealthMonitor("preview");
   previewStream?.getTracks().forEach((track) => track.stop());
   previewStream = null;
+  el<HTMLDivElement>("cropOverlay").classList.add("hidden");
 }
 
 function stopHealthMonitor(kind: "preview" | "recording") {
@@ -278,6 +284,36 @@ function updateTimer() {
 function updateUploadProgress(value: number) {
   el<HTMLDivElement>("uploadBar").style.width = `${value}%`;
   setText("uploadPercent", `${value}%`);
+}
+
+function renderCropOverlayStatus(state?: CropOverlayState) {
+  if (!state?.visible) {
+    setText("cropOverlayStatus", "Floating frame is off. Use it to crop a browser/video while the recorder is aside.");
+    el<HTMLButtonElement>("lockCropOverlay").textContent = "Lock Click-through";
+    return;
+  }
+  cropOverlayLocked = state.locked;
+  el<HTMLButtonElement>("lockCropOverlay").textContent = state.locked ? "Unlock Frame" : "Lock Click-through";
+  setText("cropOverlayStatus", `Floating frame: ${state.aspect} at ${state.bounds.width}x${state.bounds.height}. ${state.locked ? "Click-through is on; use Unlock Frame to move it." : "Move or resize it over the browser/video."}`);
+}
+
+async function showFloatingCropOverlay() {
+  if (!bridgeAvailable) return;
+  const aspect = selectedCaptureAspect() === "source" ? "16:9" : selectedCaptureAspect();
+  const state = await bridge().showCropOverlay(aspect);
+  renderCropOverlayStatus(state);
+}
+
+async function hideFloatingCropOverlay() {
+  if (!bridgeAvailable) return;
+  const state = await bridge().hideCropOverlay();
+  renderCropOverlayStatus(state);
+}
+
+async function toggleFloatingCropOverlayLock() {
+  if (!bridgeAvailable) return;
+  const state = await bridge().lockCropOverlay(!cropOverlayLocked);
+  renderCropOverlayStatus(state);
 }
 
 function updateMeter(barId: string, labelId: string, value: number, label: string) {
@@ -511,6 +547,7 @@ async function loadSettings() {
   el<HTMLSelectElement>("quality").value = settings.quality;
   el<HTMLSelectElement>("resolution").value = settings.resolution ?? "source";
   el<HTMLSelectElement>("frameRate").value = String(settings.frameRate ?? 60);
+  el<HTMLSelectElement>("captureAspect").value = settings.captureAspect ?? "source";
   el<HTMLInputElement>("existingProjectId").value = settings.existingProjectId ?? "";
   if (settings.selectedMicDeviceId) el<HTMLSelectElement>("micSelect").value = settings.selectedMicDeviceId;
   if (settings.selectedSystemAudioDeviceId) el<HTMLSelectElement>("systemAudioSelect").value = settings.selectedSystemAudioDeviceId;
@@ -529,6 +566,7 @@ async function saveSettings() {
     quality: el<HTMLSelectElement>("quality").value as RecorderSettings["quality"],
     resolution: el<HTMLSelectElement>("resolution").value as RecorderSettings["resolution"],
     frameRate: Number(el<HTMLSelectElement>("frameRate").value) as RecorderSettings["frameRate"],
+    captureAspect: el<HTMLSelectElement>("captureAspect").value as RecorderSettings["captureAspect"],
     includeMicrophone: el<HTMLInputElement>("includeMic").checked,
     includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked,
     selectedMicDeviceId: el<HTMLSelectElement>("micSelect").value || undefined,
@@ -543,6 +581,10 @@ async function saveSettings() {
 }
 
 async function refreshSources() {
+  if (sourceRetryTimeout) {
+    window.clearTimeout(sourceRetryTimeout);
+    sourceRetryTimeout = undefined;
+  }
   setStatus("Loading sources");
   try {
     if (!bridgeAvailable) throw new Error("Electron bridge unavailable.");
@@ -559,9 +601,8 @@ async function refreshSources() {
   const list = el<HTMLDivElement>("sources");
   list.innerHTML = "";
   const visibleSources = sources.filter((source) => sourceFilter === "browser" ? source.kind === "browser" : source.id.startsWith(sourceFilter));
-  const selectableSources = sourceFilter === "screen" && !visibleSources.some((source) => source.id.startsWith("screen")) ? [stableScreenSource] : visibleSources;
   updateDiagnostics();
-  for (const source of selectableSources) {
+  for (const source of visibleSources) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "source-card";
@@ -571,12 +612,22 @@ async function refreshSources() {
     card.addEventListener("click", () => selectSource(source));
     list.appendChild(card);
   }
-  if (!selectableSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "browser" ? "browser windows" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
-  const preferredScreen = sourceFilter === "screen" ? selectableSources.find((source) => source.id.startsWith("screen")) : null;
-  const onlySource = selectableSources[0];
+  if (!visibleSources.length) {
+    const label = sourceFilter === "screen" ? "screens" : sourceFilter === "browser" ? "browser windows" : "windows";
+    const help = sourceFilter === "screen" ? "Screen Recording is enabled only after macOS returns real screen sources. If you just enabled it, quit and reopen the recorder." : "Try refreshing sources or checking capture permissions.";
+    list.innerHTML = `<div class="source-card"><strong>No ${label} found yet</strong><small>${help}</small></div>`;
+  }
+  const preferredScreen = sourceFilter === "screen" ? visibleSources.find((source) => source.id.startsWith("screen")) : null;
+  const onlySource = visibleSources[0];
   if (preferredScreen && (!selectedSource || !selectedSource.id.startsWith("screen"))) selectSource(preferredScreen);
-  else if (selectableSources.length === 1 && onlySource) selectSource(onlySource);
-  setStatus(selectableSources.length ? "Source selected" : "Idle");
+  else if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
+  if (sourceFilter === "screen" && !visibleSources.length) {
+    setText("sourceStatus", "Waiting for macOS screen source");
+    setText("selectedSourceLabel", "No screen returned by macOS yet");
+    setText("previewHealthStatus", "Preview health: waiting for real screen source.");
+    sourceRetryTimeout = window.setTimeout(() => void refreshSources(), 2000);
+  }
+  setStatus(visibleSources.length ? "Source selected" : "Idle");
 }
 
 function selectSource(source: RecorderSource) {
@@ -592,9 +643,205 @@ function selectSource(source: RecorderSource) {
 }
 
 function selectStableScreenSource() {
-  const screenSource = selectedSource?.id.startsWith("screen") ? selectedSource : sources.find((source) => source.id.startsWith("screen")) ?? stableScreenSource;
+  const screenSource = selectedSource?.id.startsWith("screen") ? selectedSource : sources.find((source) => source.id.startsWith("screen"));
+  if (!screenSource) throw new Error("No real screen source is available yet. If Screen Recording is enabled in System Settings, quit and reopen VideoBlitzer Screen Recorder so macOS returns the display.");
   if (selectedSource?.id !== screenSource.id) selectSource(screenSource);
   return screenSource;
+}
+
+function selectedCaptureAspect() {
+  return (el<HTMLSelectElement>("captureAspect").value || "source") as CaptureAspect;
+}
+
+function aspectRatio(aspect = selectedCaptureAspect()) {
+  return aspect === "4:3" ? 4 / 3 : aspect === "9:16" ? 9 / 16 : 16 / 9;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function currentPreviewContentRect() {
+  const frame = el<HTMLDivElement>("cropOverlay").getBoundingClientRect();
+  const preview = el<HTMLVideoElement>("preview");
+  const sourceWidth = preview.videoWidth || 16;
+  const sourceHeight = preview.videoHeight || 9;
+  const frameRatio = frame.width / frame.height;
+  const sourceRatio = sourceWidth / sourceHeight;
+  if (frameRatio > sourceRatio) {
+    const height = frame.height;
+    const width = height * sourceRatio;
+    return { left: (frame.width - width) / 2, top: 0, width, height };
+  }
+  const width = frame.width;
+  const height = width / sourceRatio;
+  return { left: 0, top: (frame.height - height) / 2, width, height };
+}
+
+function defaultCropRect() {
+  const ratio = aspectRatio();
+  const maxWidth = 0.86;
+  const maxHeight = 0.86;
+  let width = maxWidth;
+  let height = width / ratio;
+  if (height > maxHeight) {
+    height = maxHeight;
+    width = height * ratio;
+  }
+  return { x: (1 - width) / 2, y: (1 - height) / 2, width, height };
+}
+
+function normalizeCropRect(rect: CropRect) {
+  const ratio = aspectRatio();
+  const minWidth = 0.08;
+  const minHeight = 0.08;
+  let width = clamp(rect.width, minWidth, 1);
+  let height = width / ratio;
+  if (height > 1) {
+    height = 1;
+    width = height * ratio;
+  }
+  if (height < minHeight) {
+    height = minHeight;
+    width = height * ratio;
+  }
+  const x = clamp(rect.x, 0, 1 - width);
+  const y = clamp(rect.y, 0, 1 - height);
+  return { x, y, width, height };
+}
+
+function ensureCropRect() {
+  cropRect = normalizeCropRect(cropRect ?? defaultCropRect());
+  return cropRect;
+}
+
+async function overlayCropRectForSource(source: RecorderSource) {
+  if (!bridgeAvailable || !source.bounds) return null;
+  const state = await bridge().getCropOverlayState().catch(() => null);
+  if (!state?.visible || state.aspect === "source") return null;
+  const display = source.bounds;
+  const x1 = clamp((state.bounds.x - display.x) / display.width, 0, 1);
+  const y1 = clamp((state.bounds.y - display.y) / display.height, 0, 1);
+  const x2 = clamp((state.bounds.x + state.bounds.width - display.x) / display.width, 0, 1);
+  const y2 = clamp((state.bounds.y + state.bounds.height - display.y) / display.height, 0, 1);
+  const width = x2 - x1;
+  const height = y2 - y1;
+  if (width <= 0.02 || height <= 0.02) return null;
+  return { x: x1, y: y1, width, height };
+}
+
+function renderCropOverlay() {
+  const overlay = el<HTMLDivElement>("cropOverlay");
+  const box = el<HTMLDivElement>("cropBox");
+  if (selectedCaptureAspect() === "source" || !previewStream) {
+    overlay.classList.add("hidden");
+    return;
+  }
+  const rect = ensureCropRect();
+  const content = currentPreviewContentRect();
+  overlay.classList.remove("hidden");
+  box.style.left = `${content.left + rect.x * content.width}px`;
+  box.style.top = `${content.top + rect.y * content.height}px`;
+  box.style.width = `${rect.width * content.width}px`;
+  box.style.height = `${rect.height * content.height}px`;
+  setText("previewHealthStatus", `Preview health: crop ready (${selectedCaptureAspect()}, drag or resize the box).`);
+}
+
+function pointerToCropPosition(event: PointerEvent) {
+  const overlayBounds = el<HTMLDivElement>("cropOverlay").getBoundingClientRect();
+  const content = currentPreviewContentRect();
+  return {
+    x: clamp((event.clientX - overlayBounds.left - content.left) / content.width, 0, 1),
+    y: clamp((event.clientY - overlayBounds.top - content.top) / content.height, 0, 1),
+  };
+}
+
+function updateCropFromPointer(event: PointerEvent) {
+  if (!cropDrag) return;
+  const point = pointerToCropPosition(event);
+  const start = cropDrag.startRect;
+  const startPoint = cropDrag.mode === "move" ? { x: cropDrag.startX, y: cropDrag.startY } : { x: cropDrag.startX, y: cropDrag.startY };
+  const dx = point.x - startPoint.x;
+  const dy = point.y - startPoint.y;
+  if (cropDrag.mode === "move") {
+    cropRect = normalizeCropRect({ ...start, x: start.x + dx, y: start.y + dy });
+    renderCropOverlay();
+    return;
+  }
+  const ratio = aspectRatio();
+  let anchorX = start.x;
+  let anchorY = start.y;
+  let nextWidth = start.width;
+  let nextHeight = start.height;
+  if (cropDrag.handle.includes("e")) nextWidth = clamp(point.x - start.x, 0.08, 1 - start.x);
+  if (cropDrag.handle.includes("w")) {
+    anchorX = start.x + start.width;
+    nextWidth = clamp(anchorX - point.x, 0.08, anchorX);
+  }
+  nextHeight = nextWidth / ratio;
+  if (cropDrag.handle.includes("n")) anchorY = start.y + start.height;
+  let nextX = cropDrag.handle.includes("w") ? anchorX - nextWidth : start.x;
+  let nextY = cropDrag.handle.includes("n") ? anchorY - nextHeight : start.y;
+  if (nextY < 0) {
+    nextY = 0;
+    nextHeight = anchorY;
+    nextWidth = nextHeight * ratio;
+    if (cropDrag.handle.includes("w")) nextX = anchorX - nextWidth;
+  }
+  if (nextY + nextHeight > 1) {
+    nextHeight = 1 - nextY;
+    nextWidth = nextHeight * ratio;
+    if (cropDrag.handle.includes("w")) nextX = anchorX - nextWidth;
+  }
+  cropRect = normalizeCropRect({ x: nextX, y: nextY, width: nextWidth, height: nextHeight });
+  renderCropOverlay();
+}
+
+async function formatVideoStream(inputStream: MediaStream, frameRate: number) {
+  const aspect = (el<HTMLSelectElement>("captureAspect").value || "source") as CaptureAspect;
+  if (aspect === "source") return inputStream;
+  return cropVideoStream(inputStream, frameRate, ensureCropRect(), `preview ${aspect}`);
+}
+
+async function cropVideoStream(inputStream: MediaStream, frameRate: number, crop: CropRect, label: string) {
+  formattedVideoCleanup?.();
+  formattedVideoCleanup = null;
+  const sourceVideo = document.createElement("video");
+  sourceVideo.muted = true;
+  sourceVideo.playsInline = true;
+  sourceVideo.srcObject = inputStream;
+  await sourceVideo.play().catch(() => undefined);
+  await new Promise<void>((resolve) => {
+    if (sourceVideo.videoWidth && sourceVideo.videoHeight) resolve();
+    else sourceVideo.onloadedmetadata = () => resolve();
+  });
+  const sourceWidth = sourceVideo.videoWidth || inputStream.getVideoTracks()[0]?.getSettings().width || 1920;
+  const sourceHeight = sourceVideo.videoHeight || inputStream.getVideoTracks()[0]?.getSettings().height || 1080;
+  const sourceCrop = {
+    x: Math.floor(crop.x * sourceWidth),
+    y: Math.floor(crop.y * sourceHeight),
+    width: Math.max(2, Math.floor(crop.width * sourceWidth / 2) * 2),
+    height: Math.max(2, Math.floor(crop.height * sourceHeight / 2) * 2),
+  };
+  const canvas = document.createElement("canvas");
+  canvas.width = sourceCrop.width;
+  canvas.height = sourceCrop.height;
+  const context = canvas.getContext("2d");
+  if (!context) return inputStream;
+  let active = true;
+  formattedVideoCleanup = () => {
+    active = false;
+    sourceVideo.srcObject = null;
+  };
+  const drawFrame = () => {
+    if (!active) return;
+    context.drawImage(sourceVideo, sourceCrop.x, sourceCrop.y, sourceCrop.width, sourceCrop.height, 0, 0, sourceCrop.width, sourceCrop.height);
+    if (sourceVideo.srcObject) window.requestAnimationFrame(drawFrame);
+  };
+  drawFrame();
+  setText("previewHealthStatus", `Preview health: recording ${label} crop at ${sourceCrop.width}x${sourceCrop.height}.`);
+  sourceVideoStream = inputStream;
+  return canvas.captureStream(frameRate);
 }
 
 async function startSourcePreview() {
@@ -618,8 +865,10 @@ async function startSourcePreview() {
     el("preview").parentElement?.classList.add("has-video");
     el("previewPlaceholder").textContent = "";
     startHealthMonitor("preview", preview, previewStream, "previewHealthStatus");
+    renderCropOverlay();
   } catch (error) {
     el("preview").parentElement?.classList.remove("has-video");
+    el<HTMLDivElement>("cropOverlay").classList.add("hidden");
     el("previewPlaceholder").textContent = "Live preview unavailable. Start Capture can still request screen permission.";
     setText("previewHealthStatus", "Preview health: unavailable.");
     setText("uploadStatus", error instanceof Error ? friendlyCaptureError(error) : "Live preview could not start.");
@@ -645,11 +894,12 @@ async function buildVideoStream() {
     },
   } as unknown as MediaStreamConstraints;
 
+  const overlayCrop = selectedMode === "screen" ? await overlayCropRectForSource(captureSource) : null;
+  if (overlayCrop) {
+    await bridge().hideCropOverlay().then(renderCropOverlayStatus).catch(() => undefined);
+    await new Promise((resolve) => window.setTimeout(resolve, 160));
+  }
   const displayStream = await navigator.mediaDevices.getUserMedia(videoConstraints).catch(async (error) => {
-    if (selectedMode === "screen" && "getDisplayMedia" in navigator.mediaDevices) {
-      setText("previewHealthStatus", "Preview health: using full-screen fallback capture.");
-      return navigator.mediaDevices.getDisplayMedia({ video: { frameRate }, audio: false });
-    }
     if (navigator.userAgent.includes("Mac")) {
       throw new Error("Screen recording permission is required. Enable it in System Settings -> Privacy & Security -> Screen Recording, then restart VideoBlitzer Screen Recorder.");
     }
@@ -657,7 +907,8 @@ async function buildVideoStream() {
   });
 
   setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? "System audio: recording from routed input" : "System audio: off");
-  return displayStream;
+  if (overlayCrop) return cropVideoStream(displayStream, frameRate, overlayCrop, "floating frame");
+  return formatVideoStream(displayStream, frameRate);
 }
 
 async function buildRoutedAudioStream() {
@@ -782,8 +1033,12 @@ async function startRecording() {
     stopHealthMonitor("recording");
     stopRecordingAudioMeter();
     stream?.getTracks().forEach((track) => track.stop());
+    sourceVideoStream?.getTracks().forEach((track) => track.stop());
+    formattedVideoCleanup?.();
     audioStream?.getTracks().forEach((track) => track.stop());
     stream = null;
+    sourceVideoStream = null;
+    formattedVideoCleanup = null;
     audioStream = null;
     el<HTMLButtonElement>("startRecording").disabled = selectedMode === "screen" ? false : !selectedSource;
     el<HTMLButtonElement>("stopRecording").disabled = true;
@@ -813,8 +1068,12 @@ async function finishRecording() {
     setText("recordingHealthStatus", "Recording health: finalized.");
     el("recBadge").classList.remove("active");
     stream?.getTracks().forEach((track) => track.stop());
+    sourceVideoStream?.getTracks().forEach((track) => track.stop());
+    formattedVideoCleanup?.();
     audioStream?.getTracks().forEach((track) => track.stop());
     stream = null;
+    sourceVideoStream = null;
+    formattedVideoCleanup = null;
     audioStream = null;
     await chunkSaveChain;
     await audioChunkSaveChain;
@@ -856,6 +1115,10 @@ async function finishRecording() {
     stopHealthMonitor("recording");
     stopRecordingAudioMeter();
     audioStream?.getTracks().forEach((track) => track.stop());
+    sourceVideoStream?.getTracks().forEach((track) => track.stop());
+    formattedVideoCleanup?.();
+    sourceVideoStream = null;
+    formattedVideoCleanup = null;
     audioStream = null;
     setText("uploadStatus", error instanceof Error ? `Could not finalize recording: ${error.message}. Use crash recovery to recover saved chunks.` : "Could not finalize recording. Use crash recovery to recover saved chunks.");
     el<HTMLButtonElement>("startRecording").disabled = selectedMode === "screen" ? false : !selectedSource;
@@ -1195,7 +1458,7 @@ function collectMetadata() {
   return {
     matchMetadata,
     permission: { permissionConfirmed, confirmedAt: permissionConfirmed ? new Date().toISOString() : undefined, sourceLabel: selectedSource?.name, appVersion, recordingMode: selectedMode },
-    recordingMetadata: { mode: selectedMode, sourceLabel: selectedSource?.name, appVersion, platform: platformLabel, audioSettings: audioSettings(), sentenceAwareEditing: { preserveCompleteSentences: true, handlesSeconds: [1, 3], manualOverride: el<HTMLInputElement>("manualCutOverride").checked } },
+    recordingMetadata: { mode: selectedMode, sourceLabel: selectedSource?.name, appVersion, platform: platformLabel, captureAspect: el<HTMLSelectElement>("captureAspect").value, audioSettings: audioSettings(), sentenceAwareEditing: { preserveCompleteSentences: true, handlesSeconds: [1, 3], manualOverride: el<HTMLInputElement>("manualCutOverride").checked } },
   };
 }
 
@@ -1553,6 +1816,9 @@ function setupPremiumInteractions() {
   el("pauseRecording").addEventListener("click", pauseOrResume);
   el("cancelUpload").addEventListener("click", () => activeUploadXhr?.abort());
   el("testMic").addEventListener("click", () => void testMicrophone());
+  el("showCropOverlay").addEventListener("click", () => void showFloatingCropOverlay());
+  el("hideCropOverlay").addEventListener("click", () => void hideFloatingCropOverlay());
+  el("lockCropOverlay").addEventListener("click", () => void toggleFloatingCropOverlayLock());
   el("refreshRecovery").addEventListener("click", () => void renderRecoveries());
   el("selectCombineVideo").addEventListener("click", () => void selectCombineFile("video"));
   el("selectCombineAudio").addEventListener("click", () => void selectCombineFile("audio"));
@@ -1571,6 +1837,34 @@ function setupPremiumInteractions() {
     }
     void saveSettings();
   }));
+  el("captureAspect").addEventListener("change", () => {
+    cropRect = selectedCaptureAspect() === "source" ? null : defaultCropRect();
+    renderCropOverlay();
+    void window.videoBlitzerRecorder?.getCropOverlayState?.().then((state) => {
+      if (state.visible) return window.videoBlitzerRecorder.showCropOverlay(selectedCaptureAspect() === "source" ? "16:9" : selectedCaptureAspect());
+      return state;
+    }).then(renderCropOverlayStatus).catch(() => undefined);
+  });
+  el("cropBox").addEventListener("pointerdown", (event) => {
+    if (selectedCaptureAspect() === "source") return;
+    const pointerEvent = event as PointerEvent;
+    const target = event.target as HTMLElement;
+    const point = pointerToCropPosition(pointerEvent);
+    cropDrag = target.dataset.handle
+      ? { mode: "resize", handle: target.dataset.handle, startX: point.x, startY: point.y, startRect: ensureCropRect() }
+      : { mode: "move", startX: point.x, startY: point.y, startRect: ensureCropRect() };
+    el<HTMLElement>("cropBox").setPointerCapture(pointerEvent.pointerId);
+    event.preventDefault();
+  });
+  el("cropBox").addEventListener("pointermove", (event) => updateCropFromPointer(event as PointerEvent));
+  el("cropBox").addEventListener("pointerup", (event) => {
+    cropDrag = null;
+    const pointerEvent = event as PointerEvent;
+    if (el<HTMLElement>("cropBox").hasPointerCapture(pointerEvent.pointerId)) el<HTMLElement>("cropBox").releasePointerCapture(pointerEvent.pointerId);
+  });
+  el("cropBox").addEventListener("pointercancel", () => { cropDrag = null; });
+  window.addEventListener("resize", renderCropOverlay);
+  window.videoBlitzerRecorder?.onCropOverlayState?.(renderCropOverlayStatus);
   el("permissionConfirm").addEventListener("change", updatePermissionStatus);
   el("fetchMatchTimeline").addEventListener("click", () => void fetchMatchTimeline());
   el("addManualEvent").addEventListener("click", addManualMatchEvent);
@@ -1610,7 +1904,7 @@ async function init() {
   el("openRecorderTokenPage").addEventListener("click", () => { if (bridgeAvailable) void bridge().openExternal("https://app.videoblitzer.com/settings/recorder-token"); else window.open("https://app.videoblitzer.com/settings/recorder-token", "_blank"); });
   el("copyDiagnostics").addEventListener("click", () => { void navigator.clipboard.writeText(diagnosticsSnapshot()).then(() => { lastConnectionResult = "diagnostics copied"; updateDiagnostics(); }).catch(() => { lastConnectionResult = "could not copy diagnostics"; updateDiagnostics(); }); });
   ["apiUrl", "accessToken"].forEach((id) => el(id).addEventListener("input", () => { authConnected = false; void checkApi(); }));
-  ["rememberToken", "includeMic", "quality", "resolution", "frameRate", "existingProjectId"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
+  ["rememberToken", "includeMic", "quality", "captureAspect", "resolution", "frameRate", "existingProjectId"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
   try {
     configureMimeOptions();
   } catch (error) {

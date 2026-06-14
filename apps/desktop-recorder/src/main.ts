@@ -1,10 +1,10 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, screen, shell, systemPreferences } from "electron";
 import { copyFile, mkdir, readFile, readdir, stat, statfs, writeFile } from "node:fs/promises";
 import { appendFileSync, createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import { spawn } from "node:child_process";
-import type { ClipInput, CombineVideoAudioInput, RecorderSettings, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingInput } from "./types";
+import type { ClipInput, CombineVideoAudioInput, CropOverlayState, RecorderSettings, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingInput } from "./types";
 
 const startupLogPath = path.join(os.homedir(), "Library", "Logs", "VideoBlitzer", "recorder.log");
 
@@ -257,6 +257,60 @@ function showStartupErrorWindow(title: string, message: string) {
   `)}`);
 }
 
+let cropOverlayWindow: BrowserWindow | null = null;
+let cropOverlayState: CropOverlayState = { visible: false, locked: false, bounds: { x: 160, y: 120, width: 960, height: 540 }, aspect: "16:9" };
+
+function updateCropOverlayStateFromWindow() {
+  if (!cropOverlayWindow || cropOverlayWindow.isDestroyed()) return;
+  cropOverlayState = { ...cropOverlayState, visible: cropOverlayWindow.isVisible(), bounds: cropOverlayWindow.getBounds() };
+}
+
+function createCropOverlayWindow() {
+  if (cropOverlayWindow && !cropOverlayWindow.isDestroyed()) return cropOverlayWindow;
+  const primary = screen.getPrimaryDisplay().workArea;
+  cropOverlayState.bounds = cropOverlayState.bounds.width > 0 ? cropOverlayState.bounds : { x: primary.x + 160, y: primary.y + 120, width: 960, height: 540 };
+  cropOverlayWindow = new BrowserWindow({
+    ...cropOverlayState.bounds,
+    minWidth: 240,
+    minHeight: 135,
+    frame: false,
+    transparent: true,
+    hasShadow: false,
+    resizable: true,
+    movable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    title: "VideoBlitzer Crop Frame",
+    backgroundColor: "#00000000",
+    webPreferences: {
+      preload: path.join(app.getAppPath(), "dist", "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+    },
+  });
+  cropOverlayWindow.setAlwaysOnTop(true, "screen-saver");
+  cropOverlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  cropOverlayWindow.on("move", updateCropOverlayStateFromWindow);
+  cropOverlayWindow.on("resize", updateCropOverlayStateFromWindow);
+  cropOverlayWindow.on("show", updateCropOverlayStateFromWindow);
+  cropOverlayWindow.on("hide", updateCropOverlayStateFromWindow);
+  cropOverlayWindow.on("closed", () => {
+    cropOverlayState = { ...cropOverlayState, visible: false };
+    cropOverlayWindow = null;
+  });
+  const overlayPath = path.join(app.getAppPath(), "dist", "renderer", "crop-overlay.html");
+  cropOverlayWindow.loadFile(overlayPath).catch((error: unknown) => logStartup("crop overlay load failed", { message: error instanceof Error ? error.message : String(error) }));
+  return cropOverlayWindow;
+}
+
+function setCropOverlayLocked(locked: boolean) {
+  cropOverlayState = { ...cropOverlayState, locked };
+  if (!cropOverlayWindow || cropOverlayWindow.isDestroyed()) return;
+  cropOverlayWindow.setIgnoreMouseEvents(locked, { forward: true });
+  cropOverlayWindow.webContents.send("crop-overlay-state", cropOverlayState);
+}
+
 function createWindow() {
   const runNavigationSmoke = process.env.VB_RECORDER_SMOKE_NAVIGATION === "1";
   const smokeScreenshotPath = process.env.VB_RECORDER_SCREENSHOT_PATH;
@@ -278,14 +332,6 @@ function createWindow() {
     },
   });
   logStartup("BrowserWindow created", { id: window.id });
-  window.webContents.session.setDisplayMediaRequestHandler((_request, callback) => {
-    void desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1, height: 1 } }).then((screenSources) => {
-      callback({ video: screenSources[0] });
-    }).catch((error) => {
-      logStartup("display media handler failed", { message: error instanceof Error ? error.message : String(error) });
-      callback({});
-    });
-  });
   const showMainWindow = (reason: string) => {
     logStartup("showing BrowserWindow", { id: window.id, reason, visible: window.isVisible(), minimized: window.isMinimized() });
     if (process.platform === "darwin") app.dock?.show();
@@ -453,14 +499,38 @@ app.whenReady().then(() => {
     const granted = await systemPreferences.askForMediaAccess("microphone");
     return { granted, status: systemPreferences.getMediaAccessStatus("microphone") };
   });
+  ipcMain.handle("show-crop-overlay", (_event, aspect: CropOverlayState["aspect"] = "16:9") => {
+    cropOverlayState = { ...cropOverlayState, aspect, visible: true };
+    const overlay = createCropOverlayWindow();
+    overlay.setAspectRatio(aspect === "source" ? 0 : aspect === "4:3" ? 4 / 3 : aspect === "9:16" ? 9 / 16 : 16 / 9);
+    overlay.showInactive();
+    overlay.webContents.send("crop-overlay-state", cropOverlayState);
+    updateCropOverlayStateFromWindow();
+    return cropOverlayState;
+  });
+  ipcMain.handle("hide-crop-overlay", () => {
+    cropOverlayWindow?.hide();
+    updateCropOverlayStateFromWindow();
+    return cropOverlayState;
+  });
+  ipcMain.handle("lock-crop-overlay", (_event, locked: boolean) => {
+    setCropOverlayLocked(Boolean(locked));
+    return cropOverlayState;
+  });
+  ipcMain.handle("get-crop-overlay-state", () => {
+    updateCropOverlayStateFromWindow();
+    return cropOverlayState;
+  });
   ipcMain.handle("get-settings", readSettings);
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
   ipcMain.handle("get-sources", async () => {
     const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true });
+    const displays = screen.getAllDisplays();
     return sources.map((source) => {
       const lower = source.name.toLowerCase();
       const isBrowser = ["chrome", "safari", "firefox", "edge", "brave", "browser"].some((label) => lower.includes(label));
-      return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL(), kind: source.id.startsWith("screen") ? "screen" : isBrowser ? "browser" : "window" };
+      const display = source.display_id ? displays.find((item) => String(item.id) === source.display_id) : undefined;
+      return { id: source.id, name: source.name, thumbnail: source.thumbnail.toDataURL(), kind: source.id.startsWith("screen") ? "screen" : isBrowser ? "browser" : "window", displayId: source.display_id, bounds: display?.bounds, scaleFactor: display?.scaleFactor };
     });
   });
   ipcMain.handle("select-output-folder", async () => {
