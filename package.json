@@ -20,9 +20,13 @@
     "postcss": "8.5.15",
     "next": {
       "postcss": "8.5.15"
+    },
+    "app-builder-lib": {
+      "@noble/hashes": "1.8.0"
     }
   },
   "devDependencies": {
+    "@noble/hashes": "^1.8.0",
     "@types/node": "latest",
     "postcss": "8.5.15",
     "typescript": "latest"

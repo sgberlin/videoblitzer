@@ -12,7 +12,7 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "smoke:navigation": "node scripts/smoke-navigation.mjs",
-    "package:mac": "npm run build && electron-builder --mac dmg --x64 --arm64 --config electron-builder.json",
+    "package:mac": "npm run build && electron-builder --mac dmg --x64 --arm64 --config electron-builder.mac.json",
     "package:win": "npm run build && electron-builder --win nsis --x64 --config electron-builder.json"
   },
   "dependencies": {

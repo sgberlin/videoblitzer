@@ -1,0 +1,21 @@
+{
+  "appId": "com.videoblitzer.recorder",
+  "productName": "VideoBlitzer Screen Recorder",
+  "afterPack": "scripts/after-pack.cjs",
+  "directories": { "output": "release", "buildResources": "build" },
+  "files": ["dist/**/*", "package.json", "build/**/*"],
+  "asarUnpack": ["node_modules/ffmpeg-static/**/*", "node_modules/ffprobe-static/**/*"],
+  "mac": {
+    "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],
+    "artifactName": "VideoBlitzer-Recorder-mac-${arch}.${ext}",
+    "icon": "build/icon.png",
+    "hardenedRuntime": true,
+    "gatekeeperAssess": false,
+    "entitlements": "build/entitlements.mac.plist",
+    "entitlementsInherit": "build/entitlements.mac.plist",
+    "extendInfo": {
+      "NSMicrophoneUsageDescription": "VideoBlitzer Screen Recorder uses the microphone only when you choose to include narration.",
+      "NSScreenCaptureDescription": "VideoBlitzer Screen Recorder captures screens and windows you select for authorized recording."
+    }
+  }
+}
