@@ -3,6 +3,12 @@ import type { RecorderSettings, RecorderSource, SaveRecordingResult, RecordingMa
 const preferredMimes = ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"];
 const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_000 } as const;
 const recordingTimesliceMs = 5_000;
+const stableScreenSource: RecorderSource = {
+  id: "screen:0:0",
+  name: "Full screen display",
+  thumbnail: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='320' height='180' viewBox='0 0 320 180'%3E%3Crect width='320' height='180' rx='20' fill='%23030a18'/%3E%3Crect x='34' y='28' width='252' height='124' rx='12' fill='%23111c35' stroke='%238b5cf6'/%3E%3Ctext x='160' y='96' fill='%23e5e7eb' font-family='Arial' font-size='18' text-anchor='middle'%3EFull screen%3C/text%3E%3C/svg%3E",
+  kind: "screen",
+};
 
 let sources: RecorderSource[] = [];
 let selectedSource: RecorderSource | null = null;
@@ -553,8 +559,9 @@ async function refreshSources() {
   const list = el<HTMLDivElement>("sources");
   list.innerHTML = "";
   const visibleSources = sources.filter((source) => sourceFilter === "browser" ? source.kind === "browser" : source.id.startsWith(sourceFilter));
+  const selectableSources = sourceFilter === "screen" && !visibleSources.some((source) => source.id.startsWith("screen")) ? [stableScreenSource] : visibleSources;
   updateDiagnostics();
-  for (const source of visibleSources) {
+  for (const source of selectableSources) {
     const card = document.createElement("button");
     card.type = "button";
     card.className = "source-card";
@@ -564,12 +571,12 @@ async function refreshSources() {
     card.addEventListener("click", () => selectSource(source));
     list.appendChild(card);
   }
-  if (!visibleSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "screen" ? "screens" : sourceFilter === "browser" ? "browser windows" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
-  const preferredScreen = sourceFilter === "screen" ? visibleSources.find((source) => source.id.startsWith("screen")) : null;
-  const onlySource = visibleSources[0];
+  if (!selectableSources.length) list.innerHTML = `<div class="source-card"><strong>No ${sourceFilter === "browser" ? "browser windows" : "windows"} found</strong><small>Try refreshing sources or checking capture permissions.</small></div>`;
+  const preferredScreen = sourceFilter === "screen" ? selectableSources.find((source) => source.id.startsWith("screen")) : null;
+  const onlySource = selectableSources[0];
   if (preferredScreen && (!selectedSource || !selectedSource.id.startsWith("screen"))) selectSource(preferredScreen);
-  else if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
-  setStatus(visibleSources.length ? "Source selected" : "Idle");
+  else if (selectableSources.length === 1 && onlySource) selectSource(onlySource);
+  setStatus(selectableSources.length ? "Source selected" : "Idle");
 }
 
 function selectSource(source: RecorderSource) {
@@ -585,8 +592,7 @@ function selectSource(source: RecorderSource) {
 }
 
 function selectStableScreenSource() {
-  const screenSource = selectedSource?.id.startsWith("screen") ? selectedSource : sources.find((source) => source.id.startsWith("screen"));
-  if (!screenSource) throw new Error("No screen source is available. Refresh Sources and grant Screen Recording permission if prompted.");
+  const screenSource = selectedSource?.id.startsWith("screen") ? selectedSource : sources.find((source) => source.id.startsWith("screen")) ?? stableScreenSource;
   if (selectedSource?.id !== screenSource.id) selectSource(screenSource);
   return screenSource;
 }
@@ -621,8 +627,9 @@ async function startSourcePreview() {
 }
 
 async function buildVideoStream() {
-  if (!selectedSource) throw new Error("Select a screen or window before recording.");
+  if (!selectedSource && selectedMode !== "screen") throw new Error("Select a screen or window before recording.");
   const captureSource = selectedMode === "screen" ? selectStableScreenSource() : selectedSource;
+  if (!captureSource) throw new Error("Select a screen or window before recording.");
   const resolution = el<HTMLSelectElement>("resolution").value;
   const resolutionConstraints: Record<string, number> = resolution === "720p" ? { maxWidth: 1280, maxHeight: 720 } : resolution === "1080p" ? { maxWidth: 1920, maxHeight: 1080 } : resolution === "1440p" ? { maxWidth: 2560, maxHeight: 1440 } : resolution === "2160p" ? { maxWidth: 3840, maxHeight: 2160 } : {};
   const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
@@ -638,7 +645,11 @@ async function buildVideoStream() {
     },
   } as unknown as MediaStreamConstraints;
 
-  const displayStream = await navigator.mediaDevices.getUserMedia(videoConstraints).catch((error) => {
+  const displayStream = await navigator.mediaDevices.getUserMedia(videoConstraints).catch(async (error) => {
+    if (selectedMode === "screen" && "getDisplayMedia" in navigator.mediaDevices) {
+      setText("previewHealthStatus", "Preview health: using full-screen fallback capture.");
+      return navigator.mediaDevices.getDisplayMedia({ video: { frameRate }, audio: false });
+    }
     if (navigator.userAgent.includes("Mac")) {
       throw new Error("Screen recording permission is required. Enable it in System Settings -> Privacy & Security -> Screen Recording, then restart VideoBlitzer Screen Recorder.");
     }
@@ -768,6 +779,15 @@ async function startRecording() {
     setStatus("Recording");
   } catch (error) {
     setStatus("Idle");
+    stopHealthMonitor("recording");
+    stopRecordingAudioMeter();
+    stream?.getTracks().forEach((track) => track.stop());
+    audioStream?.getTracks().forEach((track) => track.stop());
+    stream = null;
+    audioStream = null;
+    el<HTMLButtonElement>("startRecording").disabled = selectedMode === "screen" ? false : !selectedSource;
+    el<HTMLButtonElement>("stopRecording").disabled = true;
+    el<HTMLButtonElement>("pauseRecording").disabled = true;
     setText("uploadStatus", friendlyCaptureError(error));
   }
 }
@@ -829,7 +849,7 @@ async function finishRecording() {
     setText("uploadStatus", audioFile ? `Saved synced MP4 from separate video/audio capture. Upload when ready.` : `Saved ${fileName} locally. Upload after recording when ready.`);
     el<HTMLButtonElement>("openLocation").disabled = false;
     el<HTMLButtonElement>("uploadRecording").disabled = false;
-    el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+    el<HTMLButtonElement>("startRecording").disabled = selectedMode === "screen" ? false : !selectedSource;
     showScreen("upload");
   } catch (error) {
     setStatus("Save failed");
@@ -838,7 +858,7 @@ async function finishRecording() {
     audioStream?.getTracks().forEach((track) => track.stop());
     audioStream = null;
     setText("uploadStatus", error instanceof Error ? `Could not finalize recording: ${error.message}. Use crash recovery to recover saved chunks.` : "Could not finalize recording. Use crash recovery to recover saved chunks.");
-    el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+    el<HTMLButtonElement>("startRecording").disabled = selectedMode === "screen" ? false : !selectedSource;
   }
 }
 

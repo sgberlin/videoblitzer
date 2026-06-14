@@ -137,7 +137,7 @@
       <section id="sourceImportPanel" class="panel"><div class="section-title"><div><span class="mini-label">Admin only</span><h3>Source Import</h3></div><button id="auditSourceImport" class="ghost-button">Store audit</button></div><p class="hint warning">No arbitrary stream ripping or content extraction. YouTube/Vimeo/stream pages are metadata-only unless you provide an authorized source file or permitted direct media file URL.</p><div class="metadata-grid"><label>Source URL<input id="importSourceUrl" class="input" /></label><label>Import method<select id="importMethod" class="input"><option value="direct_file_upload">Direct file upload</option><option value="cloud_storage_url">Cloud storage file URL</option><option value="direct_media_url">Public/direct media file URL</option><option value="local_recording">Existing local recording file</option><option value="metadata_only">YouTube/Vimeo/stream metadata only</option></select></label><label class="toggle wide"><input id="importPermissionConfirm" type="checkbox" /> I confirm this import is authorized.</label><button id="fetchImportMetadata" class="ghost-button">Fetch metadata only</button><pre id="importMetadataOutput" class="path hint">No source inspected.</pre></div></section>
 
       <footer class="bottom-actions">
-        <button id="startRecording" class="record-button" disabled>Start Capture</button>
+        <button id="startRecording" class="record-button">Start Capture</button>
         <button id="pauseRecording" class="ghost-button" disabled>Pause</button>
         <button id="stopRecording" class="stop-button" disabled>Stop & Process</button>
         <button id="testMic" class="ghost-button">Test Mic</button>

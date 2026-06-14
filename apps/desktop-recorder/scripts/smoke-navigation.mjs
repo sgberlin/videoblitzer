@@ -11,7 +11,7 @@ function hasId(id) {
   return html.includes(`id="${id}"`) || html.includes(`id='${id}'`);
 }
 
-for (const screen of ["create", "setup", "capture", "review"]) {
+for (const screen of ["capture", "upload", "download", "advanced"]) {
   assert(html.includes(`data-screen="${screen}"`), `Missing ${screen} sidebar button`);
   assert(renderer.includes(`${screen}: [`), `Missing ${screen} screen mapping`);
 }
@@ -33,6 +33,9 @@ for (const id of [
   "stopRecording",
   "selectFolder",
   "uploadRecording",
+  "downloadPackagePanel",
+  "openLocation",
+  "openProjectFromPackage",
   "recentRecordings",
 ]) {
   assert(hasId(id), `Missing DOM element #${id}`);

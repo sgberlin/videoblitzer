@@ -278,6 +278,14 @@ function createWindow() {
     },
   });
   logStartup("BrowserWindow created", { id: window.id });
+  window.webContents.session.setDisplayMediaRequestHandler((_request, callback) => {
+    void desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1, height: 1 } }).then((screenSources) => {
+      callback({ video: screenSources[0] });
+    }).catch((error) => {
+      logStartup("display media handler failed", { message: error instanceof Error ? error.message : String(error) });
+      callback({});
+    });
+  });
   const showMainWindow = (reason: string) => {
     logStartup("showing BrowserWindow", { id: window.id, reason, visible: window.isVisible(), minimized: window.isMinimized() });
     if (process.platform === "darwin") app.dock?.show();
