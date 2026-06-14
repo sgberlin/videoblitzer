@@ -1,6 +1,7 @@
 {
   "appId": "com.videoblitzer.recorder",
   "productName": "VideoBlitzer Screen Recorder",
+  "afterPack": "scripts/after-pack.cjs",
   "directories": { "output": "release", "buildResources": "build" },
   "files": ["dist/**/*", "package.json", "build/**/*"],
   "asarUnpack": ["node_modules/ffmpeg-static/**/*", "node_modules/ffprobe-static/**/*"],

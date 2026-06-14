@@ -6,9 +6,12 @@ const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_0
 let sources: RecorderSource[] = [];
 let selectedSource: RecorderSource | null = null;
 let stream: MediaStream | null = null;
+let audioStream: MediaStream | null = null;
 let recorder: MediaRecorder | null = null;
+let audioRecorder: MediaRecorder | null = null;
 let chunks: BlobPart[] = [];
 let chunkSaveChain: Promise<void> = Promise.resolve();
+let audioChunkSaveChain: Promise<void> = Promise.resolve();
 let startedAt = 0;
 let timerInterval: number | undefined;
 let lastBlob: Blob | null = null;
@@ -18,7 +21,9 @@ let selectedMode = "browser";
 let sourceFilter: "screen" | "window" | "browser" = "screen";
 let markers: Array<{ time: string; label: string; note: string; seconds?: number; createdAt?: string }> = [];
 let activeManifest: RecordingManifest | null = null;
+let activeAudioManifest: RecordingManifest | null = null;
 let chunkIndex = 0;
+let audioChunkIndex = 0;
 let appVersion = "0.1.0";
 let platformLabel = "unknown";
 let combineVideoPath = "";
@@ -36,7 +41,39 @@ let renderedHighlightPackages: HighlightPackage[] = [];
 const suggestedEventIds = new Set<string>();
 let micMeterInterval: number | undefined;
 let paused = false;
-let settings: RecorderSettings = { apiUrl: "https://api.videoblitzer.com", rememberToken: false, quality: "standard", includeMicrophone: false, includeSystemAudio: false };
+let settings: RecorderSettings = { apiUrl: "https://api.videoblitzer.com", rememberToken: false, quality: "standard", includeMicrophone: true, includeSystemAudio: false };
+type RecorderScreen = "capture" | "upload" | "download" | "advanced";
+let activeScreen: RecorderScreen = "capture";
+let lastConnectionResult = "not tested";
+let authConnected = false;
+let secureStorageAvailable = false;
+let preloadLoaded = false;
+let bridgeAvailable = false;
+let lastSidebarClick = "none";
+let sourceCount = 0;
+let lastSourceRefreshError = "none";
+let recentRecordings: SaveRecordingResult[] = [];
+let micMonitorStream: MediaStream | null = null;
+let micAudioContext: AudioContext | null = null;
+let previewStream: MediaStream | null = null;
+let previewHealthInterval: number | undefined;
+let recordingHealthInterval: number | undefined;
+let captureAudioContext: AudioContext | null = null;
+
+function bridge() {
+  return window.videoBlitzerRecorder;
+}
+
+function startupLog(message: string, details?: Record<string, unknown>) {
+  try { window.videoBlitzerRecorder?.startupLog(message, details); } catch { /* logging must not break renderer startup */ }
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", () => startupLog("renderer DOMContentLoaded"));
+} else {
+  startupLog("renderer DOMContentLoaded", { readyState: document.readyState });
+}
+startupLog("renderer script loaded");
 
 function el<T extends HTMLElement>(id: string) { return document.getElementById(id) as T; }
 function setText(id: string, text: string) { el(id).textContent = text; }
@@ -78,6 +115,133 @@ function selectedToken() { return (el<HTMLTextAreaElement>("accessToken").value 
 function apiUrl() { return (el<HTMLInputElement>("apiUrl").value || "https://api.videoblitzer.com").replace(/\/$/, ""); }
 function headers(token: string) { return { "Content-Type": "application/json", Authorization: `Bearer ${token}` }; }
 
+function updateDiagnostics() {
+  const build = window.__VB_BUILD_INFO__;
+  const screenLabel = activeScreen.replace(/^./, (char) => char.toUpperCase());
+  const buildText = build ? `${build.version} ${build.commit} ${build.builtAt}` : `${appVersion} unknown`;
+  setText("diagBuildIdentity", buildText);
+  setText("diagEnvironment", location.href.includes("app.asar") ? "packaged" : build?.environment ?? "dev");
+  setText("buildFooter", `Build: ${buildText}`);
+  setText("diagPreloadLoaded", preloadLoaded ? "yes" : "no");
+  setText("diagBridgeAvailable", bridgeAvailable ? "yes" : "no");
+  setText("diagSafeStorage", secureStorageAvailable ? "yes" : "no");
+  setText("activeScreenName", `Screen: ${screenLabel}`);
+  setText("diagActiveScreen", screenLabel);
+  setText("diagLastSidebarClick", lastSidebarClick);
+  setText("diagApiUrl", apiUrl());
+  setText("diagTokenPresent", selectedToken() ? "yes" : "no");
+  setText("diagConnectionResult", lastConnectionResult);
+  setText("diagSourceCount", String(sourceCount));
+  setText("diagSourceError", lastSourceRefreshError);
+  const storageMode = el<HTMLInputElement>("rememberToken").checked ? (secureStorageAvailable ? "keychain" : "unavailable") : "session only";
+  setText("diagTokenStorage", storageMode);
+  const warning = el("tokenStorageWarning");
+  if (el<HTMLInputElement>("rememberToken").checked && !secureStorageAvailable) {
+    warning.textContent = "Secure keychain storage is unavailable. Token will not be persisted after restart.";
+  } else if (el<HTMLInputElement>("rememberToken").checked) {
+    warning.textContent = "Token will be encrypted with OS secure storage on this device.";
+  } else {
+    warning.textContent = "Token is kept for this session only unless Remember token is enabled.";
+  }
+}
+
+function setAuthDisplay(text: string, connected: boolean) {
+  for (const id of ["authStatus", "setupAuthStatus"]) {
+    const node = el(id);
+    node.textContent = text;
+    node.classList.toggle("success", connected);
+    node.classList.toggle("warning", !connected);
+  }
+}
+
+function selectedMicLabel() {
+  const select = el<HTMLSelectElement>("micSelect");
+  return select.selectedOptions[0]?.textContent || "Default microphone";
+}
+
+function stopPreviewStream() {
+  stopHealthMonitor("preview");
+  previewStream?.getTracks().forEach((track) => track.stop());
+  previewStream = null;
+}
+
+function stopHealthMonitor(kind: "preview" | "recording") {
+  if (kind === "preview" && previewHealthInterval) {
+    window.clearInterval(previewHealthInterval);
+    previewHealthInterval = undefined;
+  }
+  if (kind === "recording" && recordingHealthInterval) {
+    window.clearInterval(recordingHealthInterval);
+    recordingHealthInterval = undefined;
+    captureAudioContext?.close().catch(() => undefined);
+    captureAudioContext = null;
+  }
+}
+
+function sampleVideoSignal(video: HTMLVideoElement) {
+  if (!video.videoWidth || !video.videoHeight) return { ready: false, brightness: 0, contrast: 0 };
+  const canvas = document.createElement("canvas");
+  canvas.width = 96;
+  canvas.height = Math.max(1, Math.round((video.videoHeight / video.videoWidth) * canvas.width));
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) return { ready: false, brightness: 0, contrast: 0 };
+  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+  let total = 0;
+  let totalSquared = 0;
+  for (let index = 0; index < data.length; index += 4) {
+    const value = ((data[index] ?? 0) + (data[index + 1] ?? 0) + (data[index + 2] ?? 0)) / 3;
+    total += value;
+    totalSquared += value * value;
+  }
+  const pixels = data.length / 4;
+  const brightness = total / pixels;
+  const variance = totalSquared / pixels - brightness * brightness;
+  return { ready: true, brightness, contrast: Math.sqrt(Math.max(variance, 0)) };
+}
+
+function startHealthMonitor(kind: "preview" | "recording", video: HTMLVideoElement, inputStream: MediaStream, statusId: string) {
+  stopHealthMonitor(kind);
+  let analyser: AnalyserNode | null = null;
+  let audioData: Uint8Array<ArrayBuffer> | null = null;
+  const audioTracks = inputStream.getAudioTracks();
+  if (kind === "recording" && audioTracks.length) {
+    captureAudioContext = new AudioContext();
+    analyser = captureAudioContext.createAnalyser();
+    analyser.fftSize = 256;
+    captureAudioContext.createMediaStreamSource(new MediaStream(audioTracks)).connect(analyser);
+    audioData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
+  }
+  const interval = window.setInterval(() => {
+    const signal = sampleVideoSignal(video);
+    const videoStatus = !signal.ready
+      ? "video starting"
+      : signal.brightness > 8 || signal.contrast > 4
+        ? `video signal ok (${Math.round(signal.brightness)} brightness)`
+        : "video signal is very dark";
+    let audioStatus = audioTracks.length ? `${audioTracks.length} audio track(s)` : "no audio track";
+    if (analyser && audioData) {
+      analyser.getByteFrequencyData(audioData);
+      const average = audioData.reduce((sum, value) => sum + value, 0) / Math.max(audioData.length, 1);
+      audioStatus = average > 2 ? `audio signal ok (${Math.round(average)} level)` : "audio track present, low signal";
+    }
+    setText(statusId, `${kind === "preview" ? "Preview" : "Recording"} health: ${videoStatus}; ${audioStatus}.`);
+  }, 1000);
+  if (kind === "preview") previewHealthInterval = interval;
+  else recordingHealthInterval = interval;
+}
+
+async function updateMicrophonePermissionStatus(request = false) {
+  try {
+    const result = request ? await bridge().requestMicrophonePermission() : await bridge().microphonePermissionStatus();
+    setText("micPermissionStatus", `Permission: ${result.status}${"granted" in result ? (result.granted ? " (granted)" : " (not granted)") : ""}`);
+    return result.status;
+  } catch (error) {
+    setText("micPermissionStatus", `Permission: ${error instanceof Error ? error.message : "unknown"}`);
+    return "unknown";
+  }
+}
+
 function updateTimer() {
   if (!startedAt) { setText("timer", "00:00"); return; }
   const elapsed = Math.floor((Date.now() - startedAt) / 1000);
@@ -91,6 +255,69 @@ function updateTimer() {
 function updateUploadProgress(value: number) {
   el<HTMLDivElement>("uploadBar").style.width = `${value}%`;
   setText("uploadPercent", `${value}%`);
+}
+
+function updatePackageSummary() {
+  setText("finalPackagePath", savedFile?.filePath ?? "No processed package yet.");
+  setText("finalPackageSize", savedFile ? `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB` : "--");
+  setText("finalPackageObjectKey", el("objectKey").textContent?.trim() || "Not uploaded.");
+  setText("finalPackageAudio", el("audioStatus").textContent?.trim() || "Record and process a clip to verify streams.");
+  setText("finalPackageProbe", el("mediaProbeOutput").textContent?.trim() || "Media verification appears here after recording.");
+  const projectHtml = el("projectLink").innerHTML.trim();
+  el("finalPackageProjectLink").innerHTML = projectHtml || "Not uploaded.";
+  el<HTMLButtonElement>("openProjectFromPackage").disabled = !projectHtml;
+}
+
+function renderMediaMetadata(meta: { durationSeconds: number | null; format?: string; streams: Array<{ type?: string; codec?: string; durationSeconds?: number | null; channels?: number | null; sampleRate?: string; width?: number; height?: number }>; error?: string }) {
+  const audioStreams = meta.streams.filter((stream) => stream.type === "audio");
+  const videoStreams = meta.streams.filter((stream) => stream.type === "video");
+  const lines = [
+    `format: ${meta.format ?? "unknown"}`,
+    `duration: ${meta.durationSeconds?.toFixed(2) ?? "unknown"}s`,
+    `video streams: ${videoStreams.length}`,
+    ...videoStreams.map((stream, index) => `  video ${index + 1}: ${stream.codec ?? "unknown"} ${stream.width ?? "?"}x${stream.height ?? "?"}`),
+    `audio streams: ${audioStreams.length}`,
+    ...audioStreams.map((stream, index) => `  audio ${index + 1}: ${stream.codec ?? "unknown"} channels=${stream.channels ?? "?"} sampleRate=${stream.sampleRate ?? "?"} duration=${stream.durationSeconds?.toFixed(2) ?? "unknown"}s`),
+    ...(meta.error ? [`error: ${meta.error}`] : []),
+  ];
+  setText("mediaProbeOutput", lines.join("\n"));
+  setText("audioStatus", audioStreams.length ? `Audio stream detected: ${audioStreams.map((stream) => stream.codec ?? "unknown").join(", ")}` : "Warning: no audio stream detected");
+  if (!audioStreams.length) setText("micWarning", "Warning: this recording has no audio track. Check microphone permission, selected input, and Include microphone audio.");
+}
+
+function rememberRecording(recording: SaveRecordingResult) {
+  recentRecordings = [recording, ...recentRecordings.filter((item) => item.filePath !== recording.filePath)].slice(0, 8);
+  renderRecentRecordings();
+}
+
+function selectRecording(recording: SaveRecordingResult) {
+  savedFile = recording;
+  lastBlob = null;
+  setText("savedPath", recording.filePath);
+  setText("fileSize", `${(recording.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
+  el<HTMLButtonElement>("openLocation").disabled = false;
+  el<HTMLButtonElement>("uploadRecording").disabled = false;
+  setText("uploadStatus", "Recording selected. Upload to VideoBlitzer when ready.");
+  updatePackageSummary();
+  void window.videoBlitzerRecorder.mediaMetadata(recording.filePath).then((meta) => { renderMediaMetadata(meta); updatePackageSummary(); }).catch((error) => setText("mediaProbeOutput", error instanceof Error ? error.message : "Could not inspect media."));
+}
+
+function renderRecentRecordings() {
+  const list = el("recentRecordings");
+  if (!recentRecordings.length) { list.textContent = "No recent recordings yet."; return; }
+  list.innerHTML = "";
+  for (const recording of recentRecordings) {
+    const row = document.createElement("div");
+    row.className = "timeline-item";
+    row.innerHTML = `<strong>${recording.filePath.split(/[\\/]/).pop() ?? "Recording"}</strong><br><span class="path">${recording.filePath}</span><br><span>${(recording.sizeBytes / 1024 / 1024).toFixed(1)} MB</span> `;
+    const button = document.createElement("button");
+    button.className = "ghost-button";
+    button.type = "button";
+    button.textContent = "Select for upload";
+    button.addEventListener("click", () => selectRecording(recording));
+    row.appendChild(button);
+    list.appendChild(row);
+  }
 }
 
 function safeApiError(body: string, fallback: string) {
@@ -125,11 +352,31 @@ async function checkApi() {
   try {
     const response = await fetch(`${apiUrl()}/health`);
     setText("apiStatus", response.ok ? "API: online" : "API: unavailable");
-  } catch { setText("apiStatus", "API: offline"); }
-  const auth = el("authStatus");
-  auth.textContent = selectedToken() ? "Auth: token ready" : "Auth: token required";
-  auth.classList.toggle("success", Boolean(selectedToken()));
-  auth.classList.toggle("warning", !selectedToken());
+    setText("setupApiStatus", response.ok ? "API: online" : "API: unavailable");
+  } catch { setText("apiStatus", "API: offline"); setText("setupApiStatus", "API: offline"); }
+  if (!selectedToken()) authConnected = false;
+  setAuthDisplay(selectedToken() ? (authConnected ? "Auth: connected" : "Auth: token ready") : "Auth: token required", Boolean(selectedToken()) && authConnected);
+  updateDiagnostics();
+}
+
+async function testConnection() {
+  try {
+    await checkApi();
+    if (!selectedToken()) throw new Error("Paste a Supabase access token first.");
+    const response = await fetch(`${apiUrl()}/dashboard`, { headers: headers(selectedToken()) });
+    if (!response.ok) throw new Error(safeApiError(await response.text(), `Dashboard check failed with ${response.status}`));
+    authConnected = true;
+    lastConnectionResult = `connected at ${new Date().toLocaleTimeString()}`;
+    setAuthDisplay("Auth: connected", true);
+    setText("uploadStatus", "Recorder connection test passed.");
+  } catch (error) {
+    authConnected = false;
+    lastConnectionResult = error instanceof Error ? error.message : "connection test failed";
+    setAuthDisplay(selectedToken() ? "Auth: token failed" : "Auth: token required", false);
+    setText("uploadStatus", lastConnectionResult);
+  } finally {
+    updateDiagnostics();
+  }
 }
 
 function configureMimeOptions() {
@@ -150,7 +397,13 @@ function configureMimeOptions() {
 }
 
 async function loadSettings() {
-  settings = await window.videoBlitzerRecorder.getSettings();
+  if (!bridgeAvailable) {
+    lastConnectionResult = "Electron bridge unavailable. Preload did not initialize.";
+    updateDiagnostics();
+    return;
+  }
+  secureStorageAvailable = (await bridge().secureStorageStatus()).encryptionAvailable;
+  settings = await bridge().getSettings();
   el<HTMLInputElement>("apiUrl").value = settings.apiUrl;
   el<HTMLTextAreaElement>("accessToken").value = settings.token ?? "";
   el<HTMLInputElement>("rememberToken").checked = settings.rememberToken;
@@ -161,8 +414,11 @@ async function loadSettings() {
   el<HTMLSelectElement>("frameRate").value = String(settings.frameRate ?? 60);
   el<HTMLInputElement>("existingProjectId").value = settings.existingProjectId ?? "";
   if (settings.selectedMicDeviceId) el<HTMLSelectElement>("micSelect").value = settings.selectedMicDeviceId;
+  if (settings.selectedSystemAudioDeviceId) el<HTMLSelectElement>("systemAudioSelect").value = settings.selectedSystemAudioDeviceId;
+  lastConnectionResult = settings.tokenStorageMode === "unavailable" ? "secure storage unavailable; paste token again" : "not tested";
   updateAudioStatus();
   if (settings.outputFolder) setText("outputFolder", settings.outputFolder);
+  updateDiagnostics();
 }
 
 async function saveSettings() {
@@ -177,19 +433,34 @@ async function saveSettings() {
     includeMicrophone: el<HTMLInputElement>("includeMic").checked,
     includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked,
     selectedMicDeviceId: el<HTMLSelectElement>("micSelect").value || undefined,
+    selectedSystemAudioDeviceId: el<HTMLSelectElement>("systemAudioSelect").value || undefined,
     existingProjectId: el<HTMLInputElement>("existingProjectId").value.trim() || undefined,
     autoUpload: false,
   };
-  await window.videoBlitzerRecorder.saveSettings(settings);
+  settings.tokenStorageMode = settings.rememberToken ? (secureStorageAvailable ? "keychain" : "unavailable") : "session_only";
+  if (!bridgeAvailable) throw new Error("Electron bridge unavailable. Cannot save settings.");
+  await bridge().saveSettings(settings);
   await checkApi();
 }
 
 async function refreshSources() {
   setStatus("Loading sources");
-  sources = await window.videoBlitzerRecorder.getSources();
+  try {
+    if (!bridgeAvailable) throw new Error("Electron bridge unavailable.");
+    sources = await bridge().getSources();
+    sourceCount = sources.length;
+    lastSourceRefreshError = "none";
+  } catch (error) {
+    sources = [];
+    sourceCount = 0;
+    lastSourceRefreshError = error instanceof Error ? error.message : "source refresh failed";
+    setStatus("Source refresh failed");
+    updateDiagnostics();
+  }
   const list = el<HTMLDivElement>("sources");
   list.innerHTML = "";
   const visibleSources = sources.filter((source) => sourceFilter === "browser" ? source.kind === "browser" : source.id.startsWith(sourceFilter));
+  updateDiagnostics();
   for (const source of visibleSources) {
     const card = document.createElement("button");
     card.type = "button";
@@ -213,17 +484,47 @@ function selectSource(source: RecorderSource) {
   setText("reviewSource", source.name);
   [...document.querySelectorAll(".source-card")].forEach((node) => node.classList.toggle("selected", (node as HTMLElement).dataset.sourceId === source.id));
   el<HTMLButtonElement>("startRecording").disabled = false;
-  el("previewPlaceholder").textContent = "Source ready. Preview appears when recording starts.";
+  el("previewPlaceholder").textContent = "Starting live preview...";
   setStatus("Source selected");
+  void startSourcePreview();
 }
 
-async function buildStream() {
+async function startSourcePreview() {
+  if (!selectedSource) return;
+  stopPreviewStream();
+  const previewConstraints = {
+    audio: false,
+    video: {
+      mandatory: {
+        chromeMediaSource: "desktop",
+        chromeMediaSourceId: selectedSource.id,
+        maxFrameRate: 30,
+      },
+    },
+  } as unknown as MediaStreamConstraints;
+  try {
+    previewStream = await navigator.mediaDevices.getUserMedia(previewConstraints);
+    const preview = el<HTMLVideoElement>("preview");
+    preview.srcObject = previewStream;
+    await preview.play().catch(() => undefined);
+    el("preview").parentElement?.classList.add("has-video");
+    el("previewPlaceholder").textContent = "";
+    startHealthMonitor("preview", preview, previewStream, "previewHealthStatus");
+  } catch (error) {
+    el("preview").parentElement?.classList.remove("has-video");
+    el("previewPlaceholder").textContent = "Live preview unavailable. Start Capture can still request screen permission.";
+    setText("previewHealthStatus", "Preview health: unavailable.");
+    setText("uploadStatus", error instanceof Error ? friendlyCaptureError(error) : "Live preview could not start.");
+  }
+}
+
+async function buildVideoStream() {
   if (!selectedSource) throw new Error("Select a screen or window before recording.");
   const resolution = el<HTMLSelectElement>("resolution").value;
   const resolutionConstraints: Record<string, number> = resolution === "720p" ? { maxWidth: 1280, maxHeight: 720 } : resolution === "1080p" ? { maxWidth: 1920, maxHeight: 1080 } : resolution === "1440p" ? { maxWidth: 2560, maxHeight: 1440 } : resolution === "2160p" ? { maxWidth: 3840, maxHeight: 2160 } : {};
   const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
   const videoConstraints = {
-    audio: el<HTMLInputElement>("systemAudioToggle").checked ? { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: selectedSource.id } } : false,
+    audio: false,
     video: {
       mandatory: {
         chromeMediaSource: "desktop",
@@ -241,23 +542,60 @@ async function buildStream() {
     throw new Error(`Could not capture the selected source: ${error instanceof Error ? error.message : "permission denied"}`);
   });
 
-  const tracks = [...displayStream.getVideoTracks(), ...displayStream.getAudioTracks()];
+  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? "System audio: recording from routed input" : "System audio: off");
+  return displayStream;
+}
+
+async function buildRoutedAudioStream() {
+  const tracks: MediaStreamTrack[] = [];
+  if (el<HTMLInputElement>("systemAudioToggle").checked) {
+    const deviceId = el<HTMLSelectElement>("systemAudioSelect").value;
+    if (!deviceId) throw new Error("Select a routed system audio input such as BlackHole or Loopback before starting guaranteed audio capture.");
+    const routedAudio = await navigator.mediaDevices.getUserMedia({ audio: { deviceId: { exact: deviceId } }, video: false });
+    tracks.push(...routedAudio.getAudioTracks());
+    setText("systemAudioStatus", `System audio: attached from ${el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent ?? "selected input"}`);
+  }
   if (el<HTMLInputElement>("includeMic").checked) {
     try {
+      await updateMicrophonePermissionStatus(true);
       const deviceId = el<HTMLSelectElement>("micSelect").value;
       const mic = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
       tracks.push(...mic.getAudioTracks());
+      setText("micTrackStatus", "Audio track attached: yes");
+      setText("micDeviceStatus", `Input: ${selectedMicLabel()}`);
     } catch {
+      setText("micTrackStatus", "Audio track attached: no");
       setText("uploadStatus", "Microphone permission was blocked or unavailable. Continuing with screen video only; enable microphone permission and retry if narration is required.");
     }
   }
   const finalStream = new MediaStream(tracks);
   const hasAudio = finalStream.getAudioTracks().length > 0;
-  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? (displayStream.getAudioTracks().length ? "System audio: detected" : "System audio: not detected") : "System audio: off");
-  setText("audioStatus", hasAudio ? "Audio detected" : "No audio detected");
+  setText("audioStatus", hasAudio ? "Separate audio recorder ready" : "No audio detected");
   if (!hasAudio) setText("micWarning", "No audio was detected. On macOS, use a source that exposes audio or a virtual audio device. On Windows, try full-screen capture or another source. You can continue video-only.");
-  if (el<HTMLInputElement>("systemAudioToggle").checked && !displayStream.getAudioTracks().length && el<HTMLInputElement>("includeMic").checked) setText("micWarning", "Only microphone audio detected. System audio may be unavailable for this source, operating system, or protected content.");
+  if (!tracks.length) throw new Error("No audio tracks were available for separate audio recording.");
   return finalStream;
+}
+
+async function getMicrophoneStream() {
+  await updateMicrophonePermissionStatus(true);
+  const deviceId = el<HTMLSelectElement>("micSelect").value;
+  const mic = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { deviceId: { exact: deviceId } } : true, video: false });
+  setText("micDeviceStatus", `Input: ${selectedMicLabel()}`);
+  setText("micTrackStatus", `Audio track attached: ${mic.getAudioTracks().length ? "yes" : "no"}`);
+  return mic;
+}
+
+async function enableMicrophoneMonitoring() {
+  if (!el<HTMLInputElement>("includeMic").checked || micMonitorStream) return;
+  try {
+    setText("micWarning", "Requesting microphone access...");
+    await startMicMeter();
+    setText("micStatus", "Microphone: enabled");
+    setText("micWarning", "Microphone enabled. The meter responds to input and narration will attach when recording starts.");
+  } catch (error) {
+    setText("micTrackStatus", "Audio track attached: no");
+    setText("micWarning", error instanceof Error ? `Microphone unavailable: ${error.message}` : "Microphone unavailable.");
+  }
 }
 
 async function startRecording() {
@@ -265,35 +603,59 @@ async function startRecording() {
     if (!el<HTMLInputElement>("permissionConfirm").checked) throw new Error("Confirm that you are authorized to record this content before starting.");
     if (!settings.outputFolder) throw new Error("Choose and save an output folder before recording so local files are recoverable.");
     await saveSettings();
-    stream = await buildStream();
+    stopPreviewStream();
+    stopMicMeter();
+    stream = await buildVideoStream();
+    audioStream = await buildRoutedAudioStream().catch((error) => {
+      setText("audioStatus", error instanceof Error ? `Separate audio unavailable: ${error.message}` : "Separate audio unavailable");
+      return null;
+    });
     const preview = el<HTMLVideoElement>("preview");
     const recordingPreview = el<HTMLVideoElement>("recordingPreview");
     preview.srcObject = stream;
     recordingPreview.srcObject = stream;
+    await recordingPreview.play().catch(() => undefined);
     el("preview").parentElement?.classList.add("has-video");
+    startHealthMonitor("recording", recordingPreview, stream, "recordingHealthStatus");
     chunks = [];
     chunkSaveChain = Promise.resolve();
+    audioChunkSaveChain = Promise.resolve();
     chunkIndex = 0;
+    audioChunkIndex = 0;
     activeManifest = createManifest();
+    activeAudioManifest = audioStream ? createManifest() : null;
+    if (activeAudioManifest) {
+      activeAudioManifest.mode = `${selectedMode}_separate_audio`;
+      activeAudioManifest.sourceLabel = el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent ?? "Routed audio";
+    }
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+    if (activeAudioManifest) await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
     lastBlob = null;
     savedFile = null;
     const quality = el<HTMLSelectElement>("quality").value as keyof typeof qualityBitrates;
-    recorder = new MediaRecorder(stream, { mimeType: selectedMime, videoBitsPerSecond: qualityBitrates[quality], audioBitsPerSecond: 128_000 });
+    recorder = new MediaRecorder(stream, { mimeType: selectedMime, videoBitsPerSecond: qualityBitrates[quality] });
     recorder.ondataavailable = (event) => {
       if (event.data.size) chunkSaveChain = chunkSaveChain.then(() => saveChunk(event.data));
     };
     recorder.onstop = () => void finishRecording();
+    if (audioStream && activeAudioManifest) {
+      const audioMime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+      audioRecorder = new MediaRecorder(audioStream, { mimeType: audioMime, audioBitsPerSecond: 160_000 });
+      audioRecorder.ondataavailable = (event) => {
+        if (event.data.size) audioChunkSaveChain = audioChunkSaveChain.then(() => saveAudioChunk(event.data));
+      };
+    }
+    startedAt = Date.now();
     recorder.start(30_000);
+    audioRecorder?.start(30_000);
     markers = [];
     renderMarkers();
-    startedAt = Date.now();
     timerInterval = window.setInterval(updateTimer, 500);
     el<HTMLButtonElement>("startRecording").disabled = true;
     el<HTMLButtonElement>("stopRecording").disabled = false;
     el<HTMLButtonElement>("pauseRecording").disabled = false;
     el("recBadge").classList.add("active");
-    startMicMeter();
+    if (!audioStream) startMicMeter();
     setStatus("Recording");
   } catch (error) {
     setStatus("Idle");
@@ -304,7 +666,10 @@ async function startRecording() {
 function stopRecording() {
   if (!recorder || recorder.state === "inactive") return;
   setStatus("Stopping");
-  recorder.stop();
+  if (audioRecorder && audioRecorder.state !== "inactive") audioRecorder.stop();
+  window.setTimeout(() => {
+    if (recorder && recorder.state !== "inactive") recorder.stop();
+  }, 120);
   el<HTMLButtonElement>("stopRecording").disabled = true;
   el<HTMLButtonElement>("pauseRecording").disabled = true;
 }
@@ -314,34 +679,53 @@ async function finishRecording() {
     window.clearInterval(timerInterval);
     timerInterval = undefined;
     stopMicMeter();
+    stopHealthMonitor("recording");
+    setText("recordingHealthStatus", "Recording health: finalized.");
     el("recBadge").classList.remove("active");
     stream?.getTracks().forEach((track) => track.stop());
+    audioStream?.getTracks().forEach((track) => track.stop());
     stream = null;
+    audioStream = null;
     await chunkSaveChain;
+    await audioChunkSaveChain;
     const fileName = filenameForMime(selectedMime);
     lastBlob = null;
     if (!activeManifest) throw new Error("Recording manifest was not available for finalization.");
     activeManifest.markers = markers;
     activeManifest.durationEstimateSeconds = Math.floor((Date.now() - startedAt) / 1000);
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
-    savedFile = await window.videoBlitzerRecorder.recoverSession(activeManifest, settings.outputFolder);
+    const videoFile = await window.videoBlitzerRecorder.recoverSession(activeManifest, settings.outputFolder);
+    let audioFile: SaveRecordingResult | null = null;
+    if (activeAudioManifest?.chunks.length) {
+      activeAudioManifest.completedAt = new Date().toISOString();
+      activeAudioManifest.durationEstimateSeconds = activeManifest.durationEstimateSeconds;
+      await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+      audioFile = await window.videoBlitzerRecorder.recoverSession(activeAudioManifest, settings.outputFolder);
+    }
+    savedFile = audioFile
+      ? await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: videoFile.filePath, audioPath: audioFile.filePath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Synced_${timestamp()}.mp4`, offsetSeconds: 0, trimToShortest: true })
+      : videoFile;
+    rememberRecording(savedFile);
     activeManifest.completedAt = new Date().toISOString();
     activeManifest.finalFilePath = savedFile.filePath;
+    activeManifest.metadata = { ...activeManifest.metadata, separateCapture: { videoPath: videoFile.filePath, audioPath: audioFile?.filePath, mergedPath: savedFile.filePath, audioOffsetSeconds: 0, trimToShortest: Boolean(audioFile) } };
     await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
     setText("savedPath", savedFile.filePath);
     setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
-    setText("audioStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone requested" : "Video only / source audio if available");
+    const mediaMeta = await window.videoBlitzerRecorder.mediaMetadata(savedFile.filePath);
+    renderMediaMetadata(mediaMeta);
+    updatePackageSummary();
     setStatus("Saved locally");
-    setText("uploadStatus", `Saved ${fileName} locally. Upload after recording when ready.`);
+    setText("uploadStatus", audioFile ? `Saved synced MP4 from separate video/audio capture. Upload when ready.` : `Saved ${fileName} locally. Upload after recording when ready.`);
     el<HTMLButtonElement>("openLocation").disabled = false;
     el<HTMLButtonElement>("uploadRecording").disabled = false;
-    el<HTMLButtonElement>("exportMp4").disabled = false;
-    el<HTMLButtonElement>("generateTranscript").disabled = false;
-    el<HTMLButtonElement>("generateClips").disabled = false;
-    el<HTMLButtonElement>("generateCaptions").disabled = false;
     el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
+    showScreen("upload");
   } catch (error) {
     setStatus("Save failed");
+    stopHealthMonitor("recording");
+    audioStream?.getTracks().forEach((track) => track.stop());
+    audioStream = null;
     setText("uploadStatus", error instanceof Error ? `Could not finalize recording: ${error.message}. Use crash recovery to recover saved chunks.` : "Could not finalize recording. Use crash recovery to recover saved chunks.");
     el<HTMLButtonElement>("startRecording").disabled = !selectedSource;
   }
@@ -389,6 +773,7 @@ async function uploadRecording() {
     if (lastBlob) await uploadToSignedUrl(lastBlob, signedUrl, signed.requiredHeaders, updateUploadProgress);
     else { await window.videoBlitzerRecorder.uploadLocalFile(savedFile.filePath, signedUrl, signed.requiredHeaders); updateUploadProgress(100); }
     setText("objectKey", objectKey);
+    updatePackageSummary();
 
     setText("uploadStatus", "Saving video record and queuing backend work...");
     const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: contentType, size_bytes: savedFile.sizeBytes, raw_format: rawFormat, desired_export_format: rawFormat === "webm" ? "mp4" : undefined, recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: contentType, duration_seconds: activeManifest?.durationEstimateSeconds }) });
@@ -399,7 +784,9 @@ async function uploadRecording() {
     if (activeManifest) { activeManifest.uploadStatus = "uploaded"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
     setText("uploadStatus", rawFormat === "webm" ? "Uploaded. MP4 conversion and analysis are queued for backend processing." : "Uploaded. Analysis is queued for backend processing.");
     el("projectLink").innerHTML = `<a href="https://app.videoblitzer.com/projects/${created.project.id}/overview">Open project in web app</a>`;
+    updatePackageSummary();
     setStatus("Uploaded");
+    showScreen("download");
   } catch (error) {
     if (activeManifest) { activeManifest.uploadStatus = "failed"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setStatus("Upload failed");
@@ -682,7 +1069,7 @@ function collectMetadata() {
 }
 
 function audioSettings() {
-  return { includeMicrophone: el<HTMLInputElement>("includeMic").checked, includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked, microphoneDeviceId: el<HTMLSelectElement>("micSelect").value || "default" };
+  return { includeMicrophone: el<HTMLInputElement>("includeMic").checked, includeSystemAudio: el<HTMLInputElement>("systemAudioToggle").checked, microphoneDeviceId: el<HTMLSelectElement>("micSelect").value || "default", systemAudioDeviceId: el<HTMLSelectElement>("systemAudioSelect").value || "none" };
 }
 
 function createManifest(): RecordingManifest {
@@ -707,19 +1094,43 @@ async function saveChunk(blob: Blob) {
   }
 }
 
+async function saveAudioChunk(blob: Blob) {
+  if (!activeAudioManifest) return;
+  const index = ++audioChunkIndex;
+  try {
+    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeAudioManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeAudioManifest.sessionId}_audio_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: 30 });
+    activeAudioManifest.chunks.push(chunk);
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+  } catch (error) {
+    setText("uploadStatus", error instanceof Error ? `Audio chunk write failed: ${error.message}. Stop recording and check disk permissions.` : "Audio chunk write failed. Stop recording and check disk permissions.");
+    if (audioRecorder && audioRecorder.state === "recording") audioRecorder.stop();
+  }
+}
+
 async function populateMicrophones() {
   try {
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const select = el<HTMLSelectElement>("micSelect");
-    const current = select.value;
-    select.innerHTML = `<option value="">Default microphone</option>`;
-    for (const device of devices.filter((item) => item.kind === "audioinput")) {
-      const option = document.createElement("option");
-      option.value = device.deviceId;
-      option.textContent = device.label || `Microphone ${select.length}`;
-      select.appendChild(option);
+    const audioInputs = devices.filter((item) => item.kind === "audioinput");
+    const fillAudioSelect = (selectId: string, defaultLabel: string, currentValue?: string) => {
+      const select = el<HTMLSelectElement>(selectId);
+      const current = currentValue ?? select.value;
+      select.innerHTML = `<option value="">${defaultLabel}</option>`;
+      for (const device of audioInputs) {
+        const option = document.createElement("option");
+        option.value = device.deviceId;
+        option.textContent = device.label || `Audio input ${select.length}`;
+        select.appendChild(option);
+      }
+      select.value = current && [...select.options].some((option) => option.value === current) ? current : "";
+    };
+    fillAudioSelect("micSelect", "Default microphone", settings.selectedMicDeviceId);
+    fillAudioSelect("systemAudioSelect", "Select routed audio input", settings.selectedSystemAudioDeviceId);
+    if (!settings.selectedSystemAudioDeviceId) {
+      const systemSelect = el<HTMLSelectElement>("systemAudioSelect");
+      const virtualOption = [...systemSelect.options].find((option) => /blackhole|loopback|soundflower|vb-cable|virtual/i.test(option.textContent ?? ""));
+      if (virtualOption) systemSelect.value = virtualOption.value;
     }
-    select.value = settings.selectedMicDeviceId ?? current;
+    setText("micStatus", audioInputs.length ? `Audio inputs: ${audioInputs.length} found` : "Microphone: no input devices found");
   } catch {
     setText("micWarning", "Microphone devices could not be listed. Grant microphone permission and try again.");
   }
@@ -727,7 +1138,8 @@ async function populateMicrophones() {
 
 function updateAudioStatus() {
   setText("micStatus", el<HTMLInputElement>("includeMic").checked ? "Microphone: on" : "Microphone: off");
-  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? "System audio: requested" : "System audio: off");
+  const systemLabel = el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent || "no routed input selected";
+  setText("systemAudioStatus", el<HTMLInputElement>("systemAudioToggle").checked ? `System audio: ${systemLabel}` : "System audio: off");
 }
 
 function updatePermissionStatus() {
@@ -750,6 +1162,7 @@ async function renderRecoveries() {
       try {
         const recovered = await window.videoBlitzerRecorder.recoverSession(session, settings.outputFolder);
         savedFile = recovered;
+        rememberRecording(recovered);
         activeManifest = { ...session, finalFilePath: recovered.filePath, completedAt: new Date().toISOString() };
         markers = (session.markers ?? []) as typeof markers;
         selectedMode = session.mode || selectedMode;
@@ -794,6 +1207,7 @@ async function combineMedia() {
     if (!Number.isFinite(offset)) throw new Error("Audio offset must be a valid number.");
     const output = await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: combineVideoPath, audioPath: combineAudioPath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Combined_${timestamp()}.mp4`, offsetSeconds: offset, trimToShortest: el<HTMLInputElement>("trimShortest").checked });
     savedFile = output;
+    rememberRecording(output);
     lastBlob = null;
     setText("savedPath", output.filePath);
     setText("combineStatus", `Combined MP4 saved: ${output.filePath}`);
@@ -861,23 +1275,69 @@ function renderMarkers() {
   renderIntelligenceOutputs();
 }
 
-function startMicMeter() {
+async function startMicMeter(inputStream?: MediaStream) {
   const meter = el("micMeter");
   meter.classList.add("active");
-  micMeterInterval = window.setInterval(() => { meter.style.width = `${20 + Math.round(Math.random() * 70)}%`; }, 240);
+  const sourceStream = inputStream ?? await getMicrophoneStream();
+  if (!inputStream) micMonitorStream = sourceStream;
+  micAudioContext?.close().catch(() => undefined);
+  micAudioContext = new AudioContext();
+  const analyser = micAudioContext.createAnalyser();
+  analyser.fftSize = 256;
+  micAudioContext.createMediaStreamSource(sourceStream).connect(analyser);
+  const data = new Uint8Array(analyser.frequencyBinCount);
+  micMeterInterval = window.setInterval(() => {
+    analyser.getByteFrequencyData(data);
+    const average = data.reduce((sum, value) => sum + value, 0) / Math.max(data.length, 1);
+    meter.style.width = `${Math.max(8, Math.min(100, Math.round((average / 128) * 100)))}%`;
+  }, 120);
 }
 
 function stopMicMeter() {
-  window.clearInterval(micMeterInterval);
+  if (micMeterInterval) window.clearInterval(micMeterInterval);
+  micMeterInterval = undefined;
+  micAudioContext?.close().catch(() => undefined);
+  micAudioContext = null;
+  micMonitorStream?.getTracks().forEach((track) => track.stop());
+  micMonitorStream = null;
   el("micMeter").classList.remove("active");
   el<HTMLElement>("micMeter").style.width = "8%";
+}
+
+async function testMicrophone() {
+  try {
+    setText("micWarning", "Testing microphone for 3 seconds...");
+    const mic = await getMicrophoneStream();
+    await startMicMeter(mic);
+    const chunks: BlobPart[] = [];
+    const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+    const testRecorder = new MediaRecorder(mic, { mimeType });
+    testRecorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
+    const stopped = new Promise<void>((resolve) => { testRecorder.onstop = () => resolve(); });
+    testRecorder.start();
+    await new Promise((resolve) => window.setTimeout(resolve, 3000));
+    testRecorder.stop();
+    await stopped;
+    stopMicMeter();
+    mic.getTracks().forEach((track) => track.stop());
+    const blob = new Blob(chunks, { type: mimeType });
+    const playback = el<HTMLAudioElement>("micPlayback");
+    playback.src = URL.createObjectURL(blob);
+    await playback.play().catch(() => undefined);
+    setText("micWarning", blob.size > 800 ? `Test Mic recorded ${(blob.size / 1024).toFixed(1)} KB and played it back.` : "Test Mic recorded very little data. Check input level or selected device.");
+    setText("micStatus", "Microphone: test complete");
+  } catch (error) {
+    stopMicMeter();
+    setText("micWarning", error instanceof Error ? `Test Mic failed: ${error.message}` : "Test Mic failed.");
+    await updateMicrophonePermissionStatus(false);
+  }
 }
 
 function pauseOrResume() {
   if (!recorder) return;
   const button = el<HTMLButtonElement>("pauseRecording");
-  if (recorder.state === "recording") { recorder.pause(); paused = true; button.textContent = "Resume"; setStatus("Paused"); return; }
-  if (recorder.state === "paused") { recorder.resume(); paused = false; button.textContent = "Pause"; setStatus("Recording"); }
+  if (recorder.state === "recording") { recorder.pause(); if (audioRecorder?.state === "recording") audioRecorder.pause(); paused = true; button.textContent = "Resume"; setStatus("Paused"); return; }
+  if (recorder.state === "paused") { recorder.resume(); if (audioRecorder?.state === "paused") audioRecorder.resume(); paused = false; button.textContent = "Pause"; setStatus("Recording"); }
 }
 
 function selectMode(mode: string) {
@@ -889,61 +1349,148 @@ function selectMode(mode: string) {
   renderMarkerButtons();
 }
 
+const screenSections: Record<RecorderScreen, string[]> = {
+  capture: ["homeScreen", "setupScreen", "metadataPermissionPanel", "recordingScreen"],
+  upload: ["postScreen"],
+  download: ["downloadPackagePanel"],
+  advanced: ["setupAuthPanel", "recoveryPanel", "matchIntelligencePanel", "combinePanel", "sourceImportPanel"],
+};
+
+function showScreen(screen: RecorderScreen) {
+  activeScreen = screen;
+  lastSidebarClick = screen;
+  const allSections = new Set(Object.values(screenSections).flat());
+  for (const id of allSections) el(id).classList.toggle("screen-hidden", !screenSections[screen].includes(id));
+  document.querySelectorAll("[data-screen]").forEach((button) => {
+    const active = (button as HTMLElement).dataset.screen === screen;
+    button.classList.toggle("active", active);
+    if (active) button.setAttribute("aria-current", "page");
+    else button.removeAttribute("aria-current");
+  });
+  updateDiagnostics();
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function diagnosticsSnapshot() {
+  const build = window.__VB_BUILD_INFO__;
+  return JSON.stringify({
+    build,
+    preloadLoaded,
+    bridgeAvailable,
+    safeStorageAvailable: secureStorageAvailable,
+    activeScreen,
+    lastSidebarClick,
+    apiUrl: apiUrl(),
+    tokenPresent: Boolean(selectedToken()),
+    lastConnectionResult,
+    sourceCount,
+    lastSourceRefreshError,
+    appVersion,
+    platformLabel,
+  }, null, 2);
+}
+
 function setupPremiumInteractions() {
-  document.querySelectorAll("[data-scroll]").forEach((button) => button.addEventListener("click", () => {
-    const target = (button as HTMLElement).dataset.scroll;
-    if (target) el(target).scrollIntoView({ behavior: "smooth", block: "start" });
+  document.querySelectorAll("[data-screen]").forEach((button) => button.addEventListener("click", () => {
+    const target = (button as HTMLElement).dataset.screen;
+    if (target === "capture" || target === "upload" || target === "download" || target === "advanced") showScreen(target);
   }));
+  startupLog("sidebar handlers attached", { count: document.querySelectorAll("[data-screen]").length });
   document.querySelectorAll(".mode-card").forEach((card) => card.addEventListener("click", () => selectMode((card as HTMLElement).dataset.mode ?? "browser")));
   el("screenTab").addEventListener("click", () => { sourceFilter = "screen"; el("screenTab").classList.add("active"); el("windowTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
   el("windowTab").addEventListener("click", () => { sourceFilter = "window"; el("windowTab").classList.add("active"); el("screenTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
   el("browserTab").addEventListener("click", () => { sourceFilter = "browser"; el("browserTab").classList.add("active"); el("screenTab").classList.remove("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
   el("pauseRecording").addEventListener("click", pauseOrResume);
   el("cancelUpload").addEventListener("click", () => activeUploadXhr?.abort());
-  el("testMic").addEventListener("click", () => { startMicMeter(); window.setTimeout(stopMicMeter, 1800); setText("micWarning", "Mic test complete. If the meter moved, input is available."); });
+  el("testMic").addEventListener("click", () => void testMicrophone());
   el("refreshRecovery").addEventListener("click", () => void renderRecoveries());
-  el("clip15").addEventListener("click", () => void createQuickClip(15));
-  el("clip30").addEventListener("click", () => void createQuickClip(30));
-  el("clip60").addEventListener("click", () => void createQuickClip(60));
-  el("clipMarker").addEventListener("click", () => void createClipAroundMarker());
   el("selectCombineVideo").addEventListener("click", () => void selectCombineFile("video"));
   el("selectCombineAudio").addEventListener("click", () => void selectCombineFile("audio"));
   el("combineMedia").addEventListener("click", () => void combineMedia());
   el("fetchImportMetadata").addEventListener("click", () => void fetchImportMetadata());
   el("auditSourceImport").addEventListener("click", () => void auditSourceImport());
-  ["includeMic", "systemAudioToggle", "micSelect"].forEach((id) => el(id).addEventListener("change", () => { updateAudioStatus(); void saveSettings(); }));
+  ["includeMic", "systemAudioToggle", "micSelect", "systemAudioSelect"].forEach((id) => el(id).addEventListener("change", () => {
+    updateAudioStatus();
+    setText("micDeviceStatus", `Input: ${selectedMicLabel()}`);
+    if (id === "includeMic" && !el<HTMLInputElement>("includeMic").checked) {
+      stopMicMeter();
+      setText("micTrackStatus", "Audio track attached: no");
+    } else if (id === "includeMic" || id === "micSelect") {
+      stopMicMeter();
+      void enableMicrophoneMonitoring();
+    }
+    void saveSettings();
+  }));
   el("permissionConfirm").addEventListener("change", updatePermissionStatus);
   el("fetchMatchTimeline").addEventListener("click", () => void fetchMatchTimeline());
   el("addManualEvent").addEventListener("click", addManualMatchEvent);
   el("alignMatchClock").addEventListener("click", alignMatchClock);
   document.querySelectorAll(".depth-card").forEach((card) => card.addEventListener("click", () => setHighlightDepth(((card as HTMLElement).dataset.length ?? "15") as HighlightLength)));
-  el("generateEssential").addEventListener("click", () => { setHighlightDepth("5"); renderHighlightPackages(["5"]); });
-  el("generateBalanced").addEventListener("click", () => { setHighlightDepth("15"); renderHighlightPackages(["15"]); });
-  el("generateDeepAnalysis").addEventListener("click", () => { setHighlightDepth("25"); renderHighlightPackages(["25"]); });
-  el("generateAllHighlights").addEventListener("click", () => renderHighlightPackages(["5", "15", "25"]));
-  ["exportMp4", "generateTranscript", "generateClips", "generateCaptions"].forEach((id) => el(id).addEventListener("click", () => setText("uploadStatus", "Upload to VideoBlitzer first. Backend generation actions will run from the project workspace.")));
 }
 
 async function init() {
-  appVersion = await window.videoBlitzerRecorder.getAppVersion();
-  platformLabel = await window.videoBlitzerRecorder.getPlatform();
-  configureMimeOptions();
-  await loadSettings();
-  await checkApi();
+  startupLog("renderer JS initialized");
+  preloadLoaded = Boolean(window.videoBlitzerRecorder);
+  bridgeAvailable = Boolean(window.videoBlitzerRecorder);
+  setupPremiumInteractions();
+  showScreen("capture");
+  updateDiagnostics();
+  try {
+    if (!bridgeAvailable) throw new Error("Electron preload bridge is unavailable.");
+    appVersion = await bridge().getAppVersion();
+    platformLabel = await bridge().getPlatform();
+  } catch (error) {
+    lastConnectionResult = error instanceof Error ? error.message : "preload bridge failed";
+    setText("uploadStatus", lastConnectionResult);
+  }
   el("refreshSources").addEventListener("click", () => void refreshSources());
   el("startRecording").addEventListener("click", () => void startRecording());
   el("stopRecording").addEventListener("click", stopRecording);
   el("uploadRecording").addEventListener("click", () => void uploadRecording());
-  el("openLocation").addEventListener("click", () => { if (savedFile) void window.videoBlitzerRecorder.openFileLocation(savedFile.filePath); });
-  el("selectFolder").addEventListener("click", async () => { const folder = await window.videoBlitzerRecorder.selectOutputFolder(); if (folder) { settings.outputFolder = folder; setText("outputFolder", folder); await saveSettings(); } });
-  ["apiUrl", "accessToken", "rememberToken", "includeMic", "quality", "resolution", "frameRate", "existingProjectId"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
-  setupPremiumInteractions();
+  el("openLocation").addEventListener("click", () => { if (savedFile && bridgeAvailable) void bridge().openFileLocation(savedFile.filePath); });
+  el("openProjectFromPackage").addEventListener("click", () => {
+    const link = el("projectLink").querySelector("a") as HTMLAnchorElement | null;
+    if (link?.href && bridgeAvailable) void bridge().openExternal(link.href);
+  });
+  el("selectFolder").addEventListener("click", async () => { if (!bridgeAvailable) { setText("outputFolder", "Electron bridge unavailable."); return; } const folder = await bridge().selectOutputFolder(); if (folder) { settings.outputFolder = folder; setText("outputFolder", folder); await saveSettings(); } });
+  el("saveRecorderSettings").addEventListener("click", () => void saveSettings().then(testConnection));
+  el("testConnection").addEventListener("click", () => void testConnection());
+  el("clearToken").addEventListener("click", () => { el<HTMLTextAreaElement>("accessToken").value = ""; authConnected = false; void saveSettings(); setAuthDisplay("Auth: token required", false); lastConnectionResult = "token cleared"; updateDiagnostics(); });
+  el("openRecorderTokenPage").addEventListener("click", () => { if (bridgeAvailable) void bridge().openExternal("https://app.videoblitzer.com/settings/recorder-token"); else window.open("https://app.videoblitzer.com/settings/recorder-token", "_blank"); });
+  el("copyDiagnostics").addEventListener("click", () => { void navigator.clipboard.writeText(diagnosticsSnapshot()).then(() => { lastConnectionResult = "diagnostics copied"; updateDiagnostics(); }).catch(() => { lastConnectionResult = "could not copy diagnostics"; updateDiagnostics(); }); });
+  ["apiUrl", "accessToken"].forEach((id) => el(id).addEventListener("input", () => { authConnected = false; void checkApi(); }));
+  ["rememberToken", "includeMic", "quality", "resolution", "frameRate", "existingProjectId"].forEach((id) => el(id).addEventListener("change", () => void saveSettings()));
+  try {
+    configureMimeOptions();
+  } catch (error) {
+    selectedMime = "video/webm";
+    setText("selectedMimeLabel", "video/webm");
+    lastConnectionResult = error instanceof Error ? `MediaRecorder setup failed: ${error.message}` : "MediaRecorder setup failed";
+  }
+  await loadSettings().catch((error) => {
+    lastConnectionResult = error instanceof Error ? error.message : "settings load failed";
+    updateDiagnostics();
+  });
+  void updateMicrophonePermissionStatus(false).then(() => {
+    window.setTimeout(() => void updateMicrophonePermissionStatus(true), 600);
+  });
+  await checkApi().catch((error) => {
+    lastConnectionResult = error instanceof Error ? error.message : "API check failed";
+    updateDiagnostics();
+  });
   selectMode((document.querySelector(".mode-card.selected") as HTMLElement | null)?.dataset.mode ?? "browser");
   renderMarkerButtons();
-  await populateMicrophones();
+  renderRecentRecordings();
+  await populateMicrophones().catch((error) => {
+    setText("micStatus", error instanceof Error ? `Microphones unavailable: ${error.message}` : "Microphones unavailable");
+  });
+  setText("micDeviceStatus", `Input: ${selectedMicLabel()}`);
+  void enableMicrophoneMonitoring();
   void refreshSources();
   void renderRecoveries();
   updatePermissionStatus();
+  document.body.dataset.recorderReady = "true";
+  updateDiagnostics();
 }
 
 void init();

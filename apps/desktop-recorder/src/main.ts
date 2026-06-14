@@ -1,31 +1,66 @@
-import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell } from "electron";
+import { app, BrowserWindow, desktopCapturer, dialog, ipcMain, safeStorage, shell, systemPreferences } from "electron";
 import { copyFile, mkdir, readFile, readdir, stat, statfs, writeFile } from "node:fs/promises";
-import { createReadStream, existsSync } from "node:fs";
+import { appendFileSync, createReadStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { spawn } from "node:child_process";
-import ffmpegStatic from "ffmpeg-static";
-import ffprobeStatic from "ffprobe-static";
 import type { ClipInput, CombineVideoAudioInput, RecorderSettings, RecordingManifest, SaveChunkInput, SaveManifestInput, SaveRecordingInput } from "./types";
+
+const startupLogPath = path.join(os.homedir(), "Library", "Logs", "VideoBlitzer", "recorder.log");
+
+function logStartup(message: string, details?: Record<string, unknown>) {
+  try {
+    mkdirSync(path.dirname(startupLogPath), { recursive: true });
+    appendFileSync(startupLogPath, `${new Date().toISOString()} ${message}${details ? ` ${JSON.stringify(details)}` : ""}\n`);
+  } catch {
+    // Startup logging must never block the recorder from opening.
+  }
+}
+
+function writeFatalLog(label: string, error: unknown) {
+  const message = error instanceof Error ? `${error.stack ?? error.message}` : String(error);
+  logStartup(label, { message });
+  try { writeFileSync("/tmp/videoblitzer-recorder-fatal.log", `${new Date().toISOString()} ${label}\n${message}\n`); } catch { /* best effort fatal logging */ }
+}
+
+process.on("uncaughtException", (error) => writeFatalLog("uncaughtException", error));
+process.on("unhandledRejection", (error) => writeFatalLog("unhandledRejection", error));
+logStartup("main module loaded", { packaged: app.isPackaged, appPath: app.getAppPath() });
+
+function resolveBundledTool(packageName: "ffmpeg-static" | "ffprobe-static") {
+  try {
+    // Keep native tool package resolution out of top-level imports so startup can log failures.
+    const resolved = require(packageName) as string | { path?: string; default?: string | { path?: string } } | null;
+    if (typeof resolved === "string") return resolved;
+    if (typeof resolved?.default === "string") return resolved.default;
+    if (resolved?.path) return resolved.path;
+    if (typeof resolved?.default === "object" && resolved.default?.path) return resolved.default.path;
+    logStartup("media tool package had no usable path", { packageName });
+  } catch (error) {
+    logStartup("media tool package resolution failed", { packageName, message: error instanceof Error ? error.message : String(error) });
+  }
+  return undefined;
+}
 
 const defaultSettings: RecorderSettings = {
   apiUrl: "https://api.videoblitzer.com",
   rememberToken: false,
   quality: "standard",
-  includeMicrophone: false,
+  includeMicrophone: true,
   includeSystemAudio: false,
   autoUpload: false,
   resolution: "source",
   frameRate: 60,
 };
-
 function userConfigPath() { return path.join(app.getPath("userData"), "recorder-settings.json"); }
 function sessionsRoot() { return path.join(app.getPath("userData"), "recording-sessions"); }
 function validateFilename(filename: string) { return filename.replace(/[^a-zA-Z0-9._ -]/g, "_").trim().replace(/\s+/g, "_"); }
 function sessionDir(sessionId: string, outputFolder?: string) { return path.join(outputFolder || sessionsRoot(), sessionId); }
 const allowedPaths = new Set<string>();
 const allowedFolders = new Set<string>();
-const ffmpegPath = ffmpegStatic || "ffmpeg";
-const ffprobePath = ffprobeStatic.path || "ffprobe";
+const ffmpegPath = resolveBundledTool("ffmpeg-static") || "ffmpeg";
+const ffprobePath = resolveBundledTool("ffprobe-static") || "ffprobe";
+logStartup("media tool paths resolved", { ffmpegPath, ffprobePath });
 
 function rememberPath(filePath: string) {
   allowedPaths.add(path.resolve(filePath));
@@ -81,10 +116,14 @@ async function readSettings(): Promise<RecorderSettings> {
     for (const root of raw.outputRoots ?? []) rememberFolder(root);
     if (raw.outputFolder) rememberFolder(raw.outputFolder);
     let token: string | undefined;
+    let tokenStorageMode: RecorderSettings["tokenStorageMode"] = "session_only";
     if (raw.rememberToken && raw.tokenEncrypted && safeStorage.isEncryptionAvailable()) {
       token = safeStorage.decryptString(Buffer.from(raw.tokenEncrypted, "base64"));
+      tokenStorageMode = "keychain";
+    } else if (raw.rememberToken && raw.tokenEncrypted) {
+      tokenStorageMode = "unavailable";
     }
-    return { ...defaultSettings, ...raw, token, tokenEncrypted: undefined };
+    return { ...defaultSettings, ...raw, token, tokenEncrypted: undefined, tokenStorageMode };
   } catch {
     return defaultSettings;
   }
@@ -93,8 +132,10 @@ async function readSettings(): Promise<RecorderSettings> {
 async function writeSettings(settings: RecorderSettings) {
   const roots = Array.from(new Set([...(settings.outputRoots ?? []), settings.outputFolder].filter(Boolean) as string[]));
   roots.forEach(rememberFolder);
-  const tokenEncrypted = settings.rememberToken && settings.token && safeStorage.isEncryptionAvailable() ? safeStorage.encryptString(settings.token).toString("base64") : undefined;
-  const safeSettings = { ...settings, outputRoots: roots, token: undefined, tokenEncrypted };
+  const canEncrypt = safeStorage.isEncryptionAvailable();
+  const tokenEncrypted = settings.rememberToken && settings.token && canEncrypt ? safeStorage.encryptString(settings.token).toString("base64") : undefined;
+  const tokenStorageMode: RecorderSettings["tokenStorageMode"] = settings.rememberToken ? (canEncrypt && tokenEncrypted ? "keychain" : "unavailable") : "session_only";
+  const safeSettings = { ...settings, outputRoots: roots, token: undefined, tokenEncrypted, tokenStorageMode };
   await mkdir(app.getPath("userData"), { recursive: true });
   await writeFile(userConfigPath(), JSON.stringify(safeSettings, null, 2));
   return { ok: true };
@@ -110,17 +151,40 @@ function runCommand(command: string, args: string[]) {
   });
 }
 
-async function ffprobeDuration(filePath: string) {
-  return new Promise<number | null>((resolve) => {
-    const child = spawn(ffprobePath, ["-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filePath], { stdio: ["ignore", "pipe", "pipe"] });
+async function ffprobeMediaMetadata(filePath: string) {
+  return new Promise<{ durationSeconds: number | null; format?: string; streams: Array<{ index?: number; type?: string; codec?: string; durationSeconds?: number | null; channels?: number | null; sampleRate?: string; width?: number; height?: number }>; error?: string }>((resolve) => {
+    const child = spawn(ffprobePath, ["-v", "error", "-print_format", "json", "-show_streams", "-show_format", filePath], { stdio: ["ignore", "pipe", "pipe"] });
     let stdout = "";
+    let stderr = "";
     child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString(); });
-    child.on("error", () => resolve(null));
+    child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString(); });
+    child.on("error", (error) => resolve({ durationSeconds: null, streams: [], error: error.message }));
     child.on("close", () => {
-      const value = Number(stdout.trim());
-      resolve(Number.isFinite(value) ? value : null);
+      try {
+        const parsed = JSON.parse(stdout) as { format?: { duration?: string; format_name?: string }; streams?: Array<Record<string, unknown>> };
+        resolve({
+          durationSeconds: Number.isFinite(Number(parsed.format?.duration)) ? Number(parsed.format?.duration) : null,
+          format: parsed.format?.format_name,
+          streams: (parsed.streams ?? []).map((stream) => ({
+            index: typeof stream.index === "number" ? stream.index : undefined,
+            type: typeof stream.codec_type === "string" ? stream.codec_type : undefined,
+            codec: typeof stream.codec_name === "string" ? stream.codec_name : undefined,
+            durationSeconds: Number.isFinite(Number(stream.duration)) ? Number(stream.duration) : null,
+            channels: typeof stream.channels === "number" ? stream.channels : null,
+            sampleRate: typeof stream.sample_rate === "string" ? stream.sample_rate : undefined,
+            width: typeof stream.width === "number" ? stream.width : undefined,
+            height: typeof stream.height === "number" ? stream.height : undefined,
+          })),
+        });
+      } catch (error) {
+        resolve({ durationSeconds: null, streams: [], error: stderr || (error instanceof Error ? error.message : "ffprobe failed") });
+      }
     });
   });
+}
+
+async function ffprobeDuration(filePath: string) {
+  return (await ffprobeMediaMetadata(filePath)).durationSeconds;
 }
 
 async function saveManifest(input: SaveManifestInput) {
@@ -175,12 +239,37 @@ async function recoverSession(manifest: RecordingManifest, outputFolder?: string
   return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
 }
 
+function showStartupErrorWindow(title: string, message: string) {
+  logStartup("showing startup error window", { title, message });
+  const errorWindow = new BrowserWindow({
+    width: 900,
+    height: 520,
+    title: "VideoBlitzer Screen Recorder Startup Error",
+    backgroundColor: "#19090b",
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+  });
+  const escapedTitle = title.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char] ?? char));
+  const escapedMessage = message.replace(/[&<>"']/g, (char) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;" }[char] ?? char));
+  errorWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
+    <!doctype html>
+    <html>
+      <head><title>${escapedTitle}</title><style>body{margin:0;background:#19090b;color:#fff;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;padding:40px;line-height:1.5}.card{max-width:760px;border:1px solid #5f232c;border-radius:18px;background:#271014;padding:28px}code{color:#f8b4c0}</style></head>
+      <body><div class="card"><h1>${escapedTitle}</h1><p>${escapedMessage}</p><p>Startup log: <code>${startupLogPath}</code></p></div></body>
+    </html>
+  `)}`);
+}
+
 function createWindow() {
+  const runNavigationSmoke = process.env.VB_RECORDER_SMOKE_NAVIGATION === "1";
+  const smokeScreenshotPath = process.env.VB_RECORDER_SCREENSHOT_PATH;
+  logStartup("creating BrowserWindow", { preload: path.join(app.getAppPath(), "dist", "preload.js") });
   const window = new BrowserWindow({
     width: 1320,
     height: 920,
     minWidth: 1080,
     minHeight: 760,
+    show: false,
+    paintWhenInitiallyHidden: true,
     title: "VideoBlitzer Screen Recorder",
     backgroundColor: "#061018",
     webPreferences: {
@@ -190,14 +279,172 @@ function createWindow() {
       sandbox: false,
     },
   });
-  window.loadFile(path.join(app.getAppPath(), "dist", "renderer", "index.html"));
+  logStartup("BrowserWindow created", { id: window.id });
+  const showMainWindow = (reason: string) => {
+    logStartup("showing BrowserWindow", { id: window.id, reason, visible: window.isVisible(), minimized: window.isMinimized() });
+    if (process.platform === "darwin") app.dock?.show();
+    if (window.isMinimized()) window.restore();
+    window.show();
+    window.focus();
+    window.moveTop();
+  };
+  window.once("ready-to-show", () => showMainWindow("ready-to-show"));
+  window.on("show", () => logStartup("BrowserWindow shown", { id: window.id }));
+  window.on("closed", () => logStartup("BrowserWindow closed", { id: window.id }));
+  window.webContents.on("preload-error", (_event, preloadPath, error) => {
+    logStartup("preload-error", { preloadPath, message: error.message, stack: error.stack });
+    showStartupErrorWindow("Preload failed", error.message);
+  });
+  window.webContents.on("did-fail-load", (_event, errorCode, errorDescription, validatedUrl) => {
+    logStartup("did-fail-load", { errorCode, errorDescription, validatedUrl });
+    showStartupErrorWindow("Renderer failed to load", `${errorDescription} (${errorCode})`);
+  });
+  window.webContents.on("render-process-gone", (_event, details) => {
+    logStartup("render-process-gone", details as unknown as Record<string, unknown>);
+    showStartupErrorWindow("Renderer process stopped", `${details.reason} (${details.exitCode})`);
+  });
+  window.webContents.on("console-message", (_event, level, message, line, sourceId) => {
+    logStartup("renderer console", { level, message, line, sourceId });
+  });
+  window.webContents.on("did-frame-finish-load", () => {
+    void window.webContents.executeJavaScript(`
+      ({
+        readyState: document.readyState,
+        title: document.title,
+        rendererScript: Boolean([...document.scripts].find((script) => script.src.includes("renderer.js"))),
+        bridge: Boolean(window.videoBlitzerRecorder),
+        activeScreen: document.getElementById("diagActiveScreen")?.textContent ?? null,
+        bodyClass: document.body?.className ?? null,
+      })
+    `).then((state) => logStartup("renderer DOM probe", state as Record<string, unknown>)).catch((error: unknown) => {
+      logStartup("renderer DOM probe failed", { message: error instanceof Error ? error.message : String(error) });
+    });
+  });
+  window.webContents.on("did-finish-load", () => {
+    logStartup("renderer file URL loaded", { url: window.webContents.getURL() });
+    showMainWindow("did-finish-load");
+  });
+  if (runNavigationSmoke) {
+    console.log("VIDEO_BLITZER_PACKAGED_SMOKE_START");
+    const runSmoke = () => {
+      void window.webContents.executeJavaScript(`
+        (async () => {
+          for (let attempt = 0; attempt < 40 && document.body?.dataset.recorderReady !== "true"; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 250));
+          }
+          const visible = (id) => !document.getElementById(id)?.classList.contains("screen-hidden");
+          const click = (screen) => {
+            document.querySelector('[data-screen="' + screen + '"]').click();
+            return {
+              screen,
+              activeScreen: document.getElementById("diagActiveScreen")?.textContent,
+              lastSidebarClick: document.getElementById("diagLastSidebarClick")?.textContent,
+              setupVisible: visible("setupScreen"),
+              captureVisible: visible("recordingScreen"),
+              uploadVisible: visible("postScreen"),
+              downloadVisible: visible("downloadPackagePanel"),
+              advancedVisible: visible("setupAuthPanel"),
+            };
+          };
+          const result = {
+            build: document.getElementById("diagBuildIdentity")?.textContent,
+            environment: document.getElementById("diagEnvironment")?.textContent,
+            preloadLoaded: document.getElementById("diagPreloadLoaded")?.textContent,
+            bridgeAvailable: document.getElementById("diagBridgeAvailable")?.textContent,
+            safeStorage: document.getElementById("diagSafeStorage")?.textContent,
+            capture: click("capture"),
+            upload: click("upload"),
+            download: click("download"),
+            advanced: click("advanced"),
+            requiredControls: ["saveRecorderSettings", "testConnection", "clearToken", "openRecorderTokenPage", "copyDiagnostics", "refreshSources", "startRecording", "stopRecording", "selectFolder", "uploadRecording", "openLocation", "openProjectFromPackage"].every((id) => Boolean(document.getElementById(id))),
+            audioDiagnostics: ["micPermissionStatus", "micDeviceStatus", "micTrackStatus", "micMeter", "micPlayback", "mediaProbeOutput"].every((id) => Boolean(document.getElementById(id))),
+            diagnosticsVisible: visible("setupAuthPanel") || Boolean(document.getElementById("diagBuildIdentity")?.textContent),
+          };
+          result.passed = Boolean(
+            result.build &&
+            result.environment === "packaged" &&
+            result.preloadLoaded === "yes" &&
+            result.bridgeAvailable === "yes" &&
+            result.capture.captureVisible &&
+            result.capture.setupVisible &&
+            result.upload.uploadVisible &&
+            result.download.downloadVisible &&
+            result.advanced.advancedVisible &&
+            result.requiredControls &&
+            result.audioDiagnostics &&
+            result.diagnosticsVisible
+          );
+          return result;
+        })();
+      `).then((result) => {
+        console.log(`VIDEO_BLITZER_PACKAGED_SMOKE ${JSON.stringify(result)}`);
+        const finish = () => app.exit(result.passed ? 0 : 1);
+        const screenshotPathForScreen = (screen: string) => {
+          if (!smokeScreenshotPath) return undefined;
+          const parsed = path.parse(smokeScreenshotPath);
+          return path.join(parsed.dir, `${parsed.name}-${screen}${parsed.ext || ".png"}`);
+        };
+        if (smokeScreenshotPath) {
+          (async () => {
+            for (const screen of ["capture", "upload", "download", "advanced"]) {
+              await window.webContents.executeJavaScript(`document.querySelector('[data-screen="${screen}"]').click()`);
+              await new Promise((resolve) => setTimeout(resolve, 250));
+              const image = await window.webContents.capturePage();
+              const filePath = screenshotPathForScreen(screen);
+              if (filePath) writeFileSync(filePath, image.toPNG());
+            }
+          })().then(() => {
+            logStartup("packaged smoke screenshots written", { smokeScreenshotPath });
+            finish();
+          }).catch((error: unknown) => {
+            logStartup("packaged smoke screenshot failed", { message: error instanceof Error ? error.message : String(error) });
+            finish();
+          });
+        } else {
+          finish();
+        }
+      }).catch((error) => {
+        console.error("VIDEO_BLITZER_PACKAGED_SMOKE_FAILED", error);
+        app.exit(1);
+      });
+    };
+    window.webContents.on("did-finish-load", () => {
+      setTimeout(runSmoke, 1500);
+    });
+    window.webContents.on("did-fail-load", (_event, _code, description) => {
+      console.error("VIDEO_BLITZER_PACKAGED_SMOKE_LOAD_FAILED", description);
+      app.exit(1);
+    });
+    setTimeout(() => {
+      if (!window.webContents.isLoading()) runSmoke();
+    }, 5000);
+  }
+  const rendererPath = path.join(app.getAppPath(), "dist", "renderer", "index.html");
+  logStartup("loading renderer file", { rendererPath });
+  window.loadFile(rendererPath).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    logStartup("loadFile rejected", { message });
+    showStartupErrorWindow("Renderer load failed", message);
+  });
+  setTimeout(() => {
+    if (!window.isDestroyed() && !window.isVisible()) showMainWindow("startup fallback timer");
+  }, 2500);
 }
 
 app.whenReady().then(() => {
+  logStartup("app ready", { packaged: app.isPackaged, resourcesPath: process.resourcesPath });
   rememberFolder(sessionsRoot());
   rememberFolder(app.getPath("videos"));
+  ipcMain.on("startup-log", (_event, message: string, details?: Record<string, unknown>) => logStartup(message, details));
   ipcMain.handle("get-app-version", () => app.getVersion());
   ipcMain.handle("get-platform", () => process.platform);
+  ipcMain.handle("secure-storage-status", () => ({ encryptionAvailable: safeStorage.isEncryptionAvailable() }));
+  ipcMain.handle("microphone-permission-status", () => ({ status: process.platform === "darwin" ? systemPreferences.getMediaAccessStatus("microphone") : "unknown" }));
+  ipcMain.handle("request-microphone-permission", async () => {
+    if (process.platform !== "darwin") return { granted: true, status: "not_required" };
+    const granted = await systemPreferences.askForMediaAccess("microphone");
+    return { granted, status: systemPreferences.getMediaAccessStatus("microphone") };
+  });
   ipcMain.handle("get-settings", readSettings);
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
   ipcMain.handle("get-sources", async () => {
@@ -256,7 +503,7 @@ app.whenReady().then(() => {
   ipcMain.handle("recover-session", (_event, manifest: RecordingManifest, outputFolder?: string) => recoverSession(manifest, outputFolder));
   ipcMain.handle("media-metadata", async (_event, filePath: string) => {
     if (!filePath || !isAllowedPath(filePath)) throw new Error("File path is required and must be selected through VideoBlitzer Screen Recorder.");
-    return { durationSeconds: await ffprobeDuration(filePath) };
+    return ffprobeMediaMetadata(filePath);
   });
   ipcMain.handle("read-local-file", async (_event, filePath: string) => {
     if (!filePath || !existsSync(filePath) || !isAllowedPath(filePath)) throw new Error("Selected file does not exist or was not created by VideoBlitzer Screen Recorder.");
@@ -303,8 +550,8 @@ app.whenReady().then(() => {
     const outputPath = await uniqueFilePath(outputFolder, input.filename);
     const offsetArgs = input.offsetSeconds >= 0 ? ["-itsoffset", String(input.offsetSeconds), "-i", input.audioPath] : ["-i", input.audioPath, "-itsoffset", String(Math.abs(input.offsetSeconds))];
     const args = input.offsetSeconds >= 0
-      ? ["-y", "-i", input.videoPath, ...offsetArgs, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "copy", "-c:a", "aac", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath]
-      : ["-y", ...offsetArgs, "-i", input.videoPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "copy", "-c:a", "aac", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath];
+      ? ["-y", "-i", input.videoPath, ...offsetArgs, "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", "aresample=async=1:first_pts=0", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath]
+      : ["-y", ...offsetArgs, "-i", input.videoPath, "-map", "1:v:0", "-map", "0:a:0", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-af", "aresample=async=1:first_pts=0", ...(input.trimToShortest ? ["-shortest"] : []), "-movflags", "+faststart", outputPath];
     await runCommand(ffmpegPath, args);
     rememberPath(outputPath);
     return { filePath: outputPath, sizeBytes: (await stat(outputPath)).size };
@@ -323,6 +570,12 @@ app.whenReady().then(() => {
   ipcMain.handle("open-file-location", async (_event, filePath: string) => {
     if (!filePath || !isAllowedPath(filePath)) throw new Error("File path is required and must be created or selected by VideoBlitzer Screen Recorder.");
     await shell.showItemInFolder(filePath);
+    return { ok: true };
+  });
+  ipcMain.handle("open-external", async (_event, url: string) => {
+    const parsed = new URL(url);
+    if (!["https:", "http:"].includes(parsed.protocol)) throw new Error("Only http and https URLs can be opened.");
+    await shell.openExternal(parsed.toString());
     return { ok: true };
   });
   createWindow();

@@ -5,6 +5,9 @@ declare global {
     videoBlitzerRecorder: {
       getSources(): Promise<RecorderSource[]>;
       getPlatform(): Promise<NodeJS.Platform>;
+      secureStorageStatus(): Promise<{ encryptionAvailable: boolean }>;
+      microphonePermissionStatus(): Promise<{ status: string }>;
+      requestMicrophonePermission(): Promise<{ granted: boolean; status: string }>;
       saveRecording(arrayBuffer: ArrayBuffer, filename: string, outputFolder?: string): Promise<SaveRecordingResult>;
       saveRecordingChunk(input: SaveChunkInput): Promise<RecordingChunkRecord>;
       saveManifest(input: SaveManifestInput): Promise<{ ok: true; manifestPath: string }>;
@@ -19,10 +22,15 @@ declare global {
       combineVideoAudio(input: CombineVideoAudioInput): Promise<SaveRecordingResult>;
       copyLocalFile(sourcePath: string, outputFolder?: string): Promise<SaveRecordingResult>;
       openFileLocation(filePath: string): Promise<{ ok: true }>;
+      openExternal(url: string): Promise<{ ok: true }>;
       getAppVersion(): Promise<string>;
       getSettings(): Promise<RecorderSettings>;
       saveSettings(settings: RecorderSettings): Promise<{ ok: true }>;
+      startupLog(message: string, details?: Record<string, unknown>): void;
     };
+  }
+  interface Window {
+    __VB_BUILD_INFO__?: { version: string; commit: string; builtAt: string; environment: string };
   }
 }
 export {};

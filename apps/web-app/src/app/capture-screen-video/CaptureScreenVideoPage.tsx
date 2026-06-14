@@ -7,7 +7,7 @@ const recorderDownloads = {
 
 export function CaptureScreenVideoPage() {
   return <section className="grid">
-    <div className="hero"><span className="pill">Private beta recorder</span><h1>Capture Screen Video</h1><p className="muted">Record your browser, screen, or app window, then upload it to VideoBlitzer for clips, exports, and MP4 conversion.</p><div className="tabs"><a className="button" href={recorderDownloads.mac}>Download Mac Recorder</a><a className="button secondary" href={recorderDownloads.windows}>Download Windows Recorder</a><a className="button secondary" href="/manual">How to record browser video</a></div></div>
+    <div className="hero"><span className="pill">Private beta recorder</span><h1>Capture Screen Video</h1><p className="muted">Record your browser, screen, or app window, then upload it to VideoBlitzer for clips, exports, and MP4 conversion.</p><div className="tabs"><a className="button" href={recorderDownloads.mac}>Download Mac Recorder</a><a className="button secondary" href={recorderDownloads.windows}>Download Windows Recorder</a><a className="button secondary" href="/settings/recorder-token">Copy recorder token</a><a className="button secondary" href="/manual">How to record browser video</a></div></div>
     <div className="grid grid-3">
       <div className="card"><h3>1. Download and open the recorder.</h3><p className="muted">Use the Mac or Windows recorder build for your device.</p></div>
       <div className="card"><h3>2. Choose screen, browser window, or app window.</h3><p className="muted">Capture browser video, online matches, app windows, or your full screen when you are authorized to record.</p></div>
