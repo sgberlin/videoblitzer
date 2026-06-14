@@ -93,6 +93,7 @@ label { display:grid; gap:var(--space-2); color:var(--muted); font-size:.85rem; 
 .crop-handle.sw { left:-9px; bottom:-9px; cursor:nesw-resize; }
 .crop-handle.se { right:-9px; bottom:-9px; cursor:nwse-resize; }
 .preview-placeholder { position:absolute; inset:0; display:grid; place-content:center; text-align:center; gap:8px; color:var(--muted); background:radial-gradient(circle, rgba(139,92,246,.14), transparent 70%); }
+.preview-thumb { width:min(420px, 82%); max-height:210px; object-fit:contain; border:1px solid var(--border); border-radius:16px; background:#020617; box-shadow:0 18px 50px rgba(0,0,0,.35); }
 .preview-frame.has-video .preview-placeholder { display:none; }
 .recording-panel { display:grid; gap:var(--space-5); }
 .recording-top { display:flex; gap:16px; align-items:center; justify-content:space-between; }

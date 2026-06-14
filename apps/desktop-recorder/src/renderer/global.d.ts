@@ -13,6 +13,8 @@ declare global {
       lockCropOverlay(locked: boolean): Promise<CropOverlayState>;
       getCropOverlayState(): Promise<CropOverlayState>;
       onCropOverlayState(callback: (state: CropOverlayState) => void): () => void;
+      startNativeScreenCapture(input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }): Promise<{ ok: true; filePath: string }>;
+      stopNativeScreenCapture(): Promise<SaveRecordingResult>;
       saveRecording(arrayBuffer: ArrayBuffer, filename: string, outputFolder?: string): Promise<SaveRecordingResult>;
       saveRecordingChunk(input: SaveChunkInput): Promise<RecordingChunkRecord>;
       saveManifest(input: SaveManifestInput): Promise<{ ok: true; manifestPath: string }>;

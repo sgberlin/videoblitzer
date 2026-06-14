@@ -61,6 +61,7 @@ const allowedFolders = new Set<string>();
 const ffmpegPath = resolveBundledTool("ffmpeg-static") || "ffmpeg";
 const ffprobePath = resolveBundledTool("ffprobe-static") || "ffprobe";
 logStartup("media tool paths resolved", { ffmpegPath, ffprobePath });
+let nativeScreenCapture: { process: ReturnType<typeof spawn>; filePath: string; stderr: string } | null = null;
 
 function rememberPath(filePath: string) {
   allowedPaths.add(path.resolve(filePath));
@@ -209,10 +210,14 @@ async function listRecoverableSessions() {
       const file = path.join(root, name, "manifest.json");
       if (!existsSync(file)) continue;
       const manifest = await readManifest(file).catch(() => null);
-      if (manifest && manifest.uploadStatus !== "uploaded" && !manifest.completedAt) sessions.push(manifest);
+      const chunks = manifest?.chunks ?? [];
+      const readableChunks = chunks.filter((chunk) => chunk.filePath && existsSync(chunk.filePath) && isAllowedPath(chunk.filePath));
+      if (manifest?.sessionId && manifest.uploadStatus !== "uploaded" && !manifest.completedAt && readableChunks.length) {
+        sessions.push({ ...manifest, chunks: readableChunks });
+      }
     }
   }
-  return sessions;
+  return sessions.sort((a, b) => (b.createdAt ?? "").localeCompare(a.createdAt ?? ""));
 }
 
 async function recoverSession(manifest: RecordingManifest, outputFolder?: string) {
@@ -255,6 +260,80 @@ function showStartupErrorWindow(title: string, message: string) {
       <body><div class="card"><h1>${escapedTitle}</h1><p>${escapedMessage}</p><p>Startup log: <code>${startupLogPath}</code></p></div></body>
     </html>
   `)}`);
+}
+
+function nativeScreenCaptureHelperPath() {
+  if (app.isPackaged) return path.join(process.resourcesPath, "native", "VideoBlitzerScreenCapture");
+  return path.join(app.getAppPath(), "dist", "native", "VideoBlitzerScreenCapture");
+}
+
+async function startNativeScreenCapture(input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }) {
+  if (nativeScreenCapture) throw new Error("Native screen capture is already running.");
+  const outputFolder = input.outputFolder || app.getPath("videos");
+  ensureAllowedFolder(outputFolder);
+  await mkdir(outputFolder, { recursive: true });
+  rememberFolder(outputFolder);
+  const filePath = await uniqueFilePath(outputFolder, input.filename || `VideoBlitzer_NativeScreen_${new Date().toISOString().replace(/[:.]/g, "-")}.mp4`);
+  const helperPath = nativeScreenCaptureHelperPath();
+  if (!existsSync(helperPath)) throw new Error(`ScreenCaptureKit helper was not found at ${helperPath}. Rebuild the recorder.`);
+  const args = ["--output", filePath, "--fps", String(input.frameRate || 60)];
+  if (input.displayId) args.push("--display-id", input.displayId);
+  const child = spawn(helperPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  let stderr = "";
+  nativeScreenCapture = { process: child, filePath, stderr };
+  logStartup("native screen capture starting", { helperPath, filePath, displayId: input.displayId });
+  return await new Promise<{ ok: true; filePath: string }>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      nativeScreenCapture = null;
+      child.kill("SIGTERM");
+      reject(new Error(`ScreenCaptureKit helper did not start. ${stderr.slice(-800)}`.trim()));
+    }, 10_000);
+    child.stdout.on("data", (chunk: Buffer) => {
+      stdout += chunk.toString();
+      if (stdout.includes("VIDEO_BLITZER_SCK_STARTED")) {
+        clearTimeout(timer);
+        resolve({ ok: true, filePath });
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderr += chunk.toString();
+      if (nativeScreenCapture) nativeScreenCapture.stderr = stderr;
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      nativeScreenCapture = null;
+      reject(error);
+    });
+    child.on("close", (code) => {
+      if (stdout.includes("VIDEO_BLITZER_SCK_STARTED")) return;
+      clearTimeout(timer);
+      nativeScreenCapture = null;
+      reject(new Error(`ScreenCaptureKit helper exited before capture started (${code}). ${stderr.slice(-800)}`.trim()));
+    });
+  });
+}
+
+async function stopNativeScreenCapture() {
+  const capture = nativeScreenCapture;
+  if (!capture) throw new Error("Native screen capture is not running.");
+  nativeScreenCapture = null;
+  capture.process.kill("SIGINT");
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(() => {
+      capture.process.kill("SIGTERM");
+      resolve();
+    }, 8_000);
+    capture.process.once("close", () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+  if (!existsSync(capture.filePath)) throw new Error(`Native screen capture did not create ${capture.filePath}. ${capture.stderr.slice(-800)}`.trim());
+  const sizeBytes = (await stat(capture.filePath)).size;
+  if (!sizeBytes) throw new Error(`Native screen capture created an empty file. ${capture.stderr.slice(-800)}`.trim());
+  rememberPath(capture.filePath);
+  return { filePath: capture.filePath, sizeBytes };
 }
 
 let cropOverlayWindow: BrowserWindow | null = null;
@@ -485,8 +564,102 @@ function createWindow() {
   }, 2500);
 }
 
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string) {
+  return Promise.race<T>([
+    promise,
+    new Promise<T>((_resolve, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+  ]);
+}
+
+async function runCaptureDiagnostic() {
+  const screenStatus = process.platform === "darwin" ? systemPreferences.getMediaAccessStatus("screen") : "unknown";
+  const microphoneStatus = process.platform === "darwin" ? systemPreferences.getMediaAccessStatus("microphone") : "unknown";
+  const [screenSources, windowSources] = await withTimeout(Promise.all([
+    desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),
+    desktopCapturer.getSources({ types: ["window"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),
+  ]), 8000, "desktopCapturer.getSources");
+  const source = screenSources[0];
+  const result: Record<string, unknown> = {
+    appPath: app.getAppPath(),
+    packaged: app.isPackaged,
+    screenPermission: screenStatus,
+    microphonePermission: microphoneStatus,
+    screenSourceCount: screenSources.length,
+    windowSourceCount: windowSources.length,
+    selectedSource: source ? { id: source.id, name: source.name, displayId: source.display_id } : null,
+  };
+  if (!source) {
+    console.log(`VIDEO_BLITZER_CAPTURE_DIAGNOSTIC ${JSON.stringify({ ...result, capture: { ok: false, message: "No screen sources returned by desktopCapturer." } })}`);
+    app.exit(2);
+    return;
+  }
+  const diagnosticWindow = new BrowserWindow({
+    width: 720,
+    height: 480,
+    title: "VideoBlitzer Capture Diagnostic",
+    backgroundColor: "#101827",
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: false },
+  });
+  await diagnosticWindow.loadURL("data:text/html;charset=utf-8,<html><body style='margin:0;background:#101827;color:white;font:14px system-ui;display:grid;place-items:center;height:100vh'>Running VideoBlitzer capture diagnostic...</body></html>");
+  const capture = await withTimeout(diagnosticWindow.webContents.executeJavaScript(`
+    (async () => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: { mandatory: { chromeMediaSource: "desktop", chromeMediaSourceId: ${JSON.stringify(source.id)}, maxFrameRate: 10 } }
+      });
+      const [track] = stream.getVideoTracks();
+      const video = document.createElement("video");
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      document.body.innerHTML = "";
+      document.body.appendChild(video);
+      await video.play().catch(() => undefined);
+      await new Promise((resolve) => {
+        if (video.videoWidth && video.videoHeight) resolve(undefined);
+        else video.onloadedmetadata = () => resolve(undefined);
+      });
+      await new Promise((resolve) => setTimeout(resolve, 900));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.min(160, video.videoWidth || 160);
+      canvas.height = Math.min(90, video.videoHeight || 90);
+      const context = canvas.getContext("2d");
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const data = context.getImageData(0, 0, canvas.width, canvas.height).data;
+      let nonBlackPixels = 0;
+      let totalLuma = 0;
+      for (let index = 0; index < data.length; index += 4) {
+        const luma = (data[index] + data[index + 1] + data[index + 2]) / 3;
+        totalLuma += luma;
+        if (luma > 8) nonBlackPixels += 1;
+      }
+      const output = {
+        ok: true,
+        trackReadyState: track.readyState,
+        trackMuted: track.muted,
+        trackSettings: track.getSettings(),
+        videoWidth: video.videoWidth,
+        videoHeight: video.videoHeight,
+        nonBlackPixelRatio: nonBlackPixels / (canvas.width * canvas.height),
+        averageLuma: totalLuma / (canvas.width * canvas.height),
+      };
+      stream.getTracks().forEach((item) => item.stop());
+      return output;
+    })().catch((error) => ({ ok: false, name: error?.name, message: error?.message }));
+  `), 15000, "renderer getUserMedia capture");
+  console.log(`VIDEO_BLITZER_CAPTURE_DIAGNOSTIC ${JSON.stringify({ ...result, capture })}`);
+  app.exit(capture?.ok ? 0 : 1);
+}
+
 app.whenReady().then(() => {
   logStartup("app ready", { packaged: app.isPackaged, resourcesPath: process.resourcesPath });
+  if (process.env.VB_RECORDER_CAPTURE_DIAG === "1") {
+    void runCaptureDiagnostic().catch((error: unknown) => {
+      console.log(`VIDEO_BLITZER_CAPTURE_DIAGNOSTIC ${JSON.stringify({ capture: { ok: false, message: error instanceof Error ? error.message : String(error) } })}`);
+      app.exit(1);
+    });
+    return;
+  }
   rememberFolder(sessionsRoot());
   rememberFolder(app.getPath("videos"));
   ipcMain.on("startup-log", (_event, message: string, details?: Record<string, unknown>) => logStartup(message, details));
@@ -523,6 +696,8 @@ app.whenReady().then(() => {
   });
   ipcMain.handle("get-settings", readSettings);
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
+  ipcMain.handle("start-native-screen-capture", (_event, input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }) => startNativeScreenCapture(input));
+  ipcMain.handle("stop-native-screen-capture", () => stopNativeScreenCapture());
   ipcMain.handle("get-sources", async () => {
     const [screenSources, windowSources] = await Promise.all([
       desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),

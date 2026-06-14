@@ -12,6 +12,8 @@ let stream: MediaStream | null = null;
 let audioStream: MediaStream | null = null;
 let recorder: MediaRecorder | null = null;
 let audioRecorder: MediaRecorder | null = null;
+let nativeScreenCaptureActive = false;
+let nativeScreenCapturePath = "";
 let chunks: BlobPart[] = [];
 let chunkSaveChain: Promise<void> = Promise.resolve();
 let audioChunkSaveChain: Promise<void> = Promise.resolve();
@@ -671,14 +673,17 @@ function setSourceFilter(filter: typeof sourceFilter) {
 
 function selectSource(source: RecorderSource) {
   selectedSource = source;
+  stopPreviewStream();
   setText("selectedSourceLabel", source.name);
   setText("sourceStatus", "Ready");
   setText("reviewSource", source.name);
   [...document.querySelectorAll(".source-card")].forEach((node) => node.classList.toggle("selected", (node as HTMLElement).dataset.sourceId === source.id));
   el<HTMLButtonElement>("startRecording").disabled = false;
-  el("previewPlaceholder").textContent = "Starting live preview...";
+  const previewFrame = el("preview").parentElement;
+  previewFrame?.classList.remove("has-video");
+  el("previewPlaceholder").innerHTML = `<strong>${source.name}</strong><span>Selected. Live capture starts when you press Start Capture.</span><img class="preview-thumb" src="${source.thumbnail}" alt="">`;
+  setText("previewHealthStatus", "Preview health: selected source thumbnail only. No macOS capture request until Start Capture.");
   setStatus("Source selected");
-  void startSourcePreview();
 }
 
 function selectStableScreenSource() {
@@ -1008,6 +1013,10 @@ async function startRecording() {
     await saveSettings();
     if (selectedMode === "screen" && !sources.some((source) => source.id.startsWith("screen"))) await refreshSources();
     if (selectedMode === "screen") selectStableScreenSource();
+    if (selectedMode === "screen") {
+      await startNativeScreenRecording();
+      return;
+    }
     stopPreviewStream();
     stopMicMeter();
     stream = await buildVideoStream();
@@ -1086,7 +1095,69 @@ async function startRecording() {
   }
 }
 
+async function startNativeScreenRecording() {
+  stopPreviewStream();
+  stopMicMeter();
+  audioStream = await buildRoutedAudioStream().catch((error) => {
+    setText("audioStatus", error instanceof Error ? `Separate audio unavailable: ${error.message}` : "Separate audio unavailable");
+    return null;
+  });
+  resetRecordingMeters();
+  startRecordingAudioMeter(audioStream);
+  chunkSaveChain = Promise.resolve();
+  audioChunkSaveChain = Promise.resolve();
+  chunkIndex = 0;
+  audioChunkIndex = 0;
+  activeManifest = createManifest();
+  activeManifest.metadata = { ...activeManifest.metadata, nativeScreenCapture: true };
+  activeAudioManifest = audioStream ? createManifest() : null;
+  if (activeAudioManifest) {
+    activeAudioManifest.mode = `${selectedMode}_separate_audio`;
+    activeAudioManifest.sourceLabel = el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent ?? "Routed audio";
+  }
+  await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+  if (activeAudioManifest) await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+  const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
+  const started = await window.videoBlitzerRecorder.startNativeScreenCapture({
+    outputFolder: settings.outputFolder,
+    filename: `VideoBlitzer_ScreenCapture_${timestamp()}.mp4`,
+    displayId: selectedSource?.displayId,
+    frameRate,
+  });
+  nativeScreenCaptureActive = true;
+  nativeScreenCapturePath = started.filePath;
+  if (audioStream && activeAudioManifest) {
+    const audioMime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/webm";
+    audioRecorder = new MediaRecorder(audioStream, { mimeType: audioMime, audioBitsPerSecond: 160_000 });
+    audioRecorder.ondataavailable = (event) => {
+      if (event.data.size) audioChunkSaveChain = audioChunkSaveChain.then(() => saveAudioChunk(event.data));
+    };
+    audioRecorder.start(recordingTimesliceMs);
+  }
+  startedAt = Date.now();
+  markers = [];
+  renderMarkers();
+  timerInterval = window.setInterval(updateTimer, 500);
+  el<HTMLButtonElement>("startRecording").disabled = true;
+  el<HTMLButtonElement>("stopRecording").disabled = false;
+  el<HTMLButtonElement>("pauseRecording").disabled = true;
+  el("recBadge").classList.add("active");
+  setText("recordingHealthStatus", "Recording health: native ScreenCaptureKit capture active.");
+  setText("previewHealthStatus", "Preview health: native capture records directly to MP4.");
+  updateMeter("videoSignalBar", "videoSignalMeter", 100, "native capture");
+  updateMeter("videoBitrateBar", "videoBitrateMeter", 75, "native MP4");
+  setStatus("Recording");
+}
+
 function stopRecording() {
+  if (nativeScreenCaptureActive) {
+    setStatus("Stopping");
+    if (audioRecorder && audioRecorder.state !== "inactive") audioRecorder.stop();
+    el<HTMLButtonElement>("stopRecording").disabled = true;
+    el<HTMLButtonElement>("pauseRecording").disabled = true;
+    window.setTimeout(() => void finishNativeScreenRecording(), 250);
+    return;
+  }
   if (!recorder || recorder.state === "inactive") return;
   setStatus("Stopping");
   if (audioRecorder && audioRecorder.state !== "inactive") audioRecorder.stop();
@@ -1095,6 +1166,61 @@ function stopRecording() {
   }, 120);
   el<HTMLButtonElement>("stopRecording").disabled = true;
   el<HTMLButtonElement>("pauseRecording").disabled = true;
+}
+
+async function finishNativeScreenRecording() {
+  try {
+    window.clearInterval(timerInterval);
+    timerInterval = undefined;
+    stopMicMeter();
+    stopRecordingAudioMeter();
+    setText("recordingHealthStatus", "Recording health: finalizing native capture.");
+    el("recBadge").classList.remove("active");
+    audioStream?.getTracks().forEach((track) => track.stop());
+    audioStream = null;
+    await audioChunkSaveChain;
+    if (!activeManifest) throw new Error("Recording manifest was not available for finalization.");
+    const videoFile = await window.videoBlitzerRecorder.stopNativeScreenCapture();
+    nativeScreenCaptureActive = false;
+    nativeScreenCapturePath = "";
+    let audioFile: SaveRecordingResult | null = null;
+    activeManifest.markers = markers;
+    activeManifest.durationEstimateSeconds = Math.floor((Date.now() - startedAt) / 1000);
+    if (activeAudioManifest?.chunks.length) {
+      activeAudioManifest.completedAt = new Date().toISOString();
+      activeAudioManifest.durationEstimateSeconds = activeManifest.durationEstimateSeconds;
+      await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+      audioFile = await window.videoBlitzerRecorder.recoverSession(activeAudioManifest, settings.outputFolder);
+    }
+    savedFile = audioFile
+      ? await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: videoFile.filePath, audioPath: audioFile.filePath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Synced_${timestamp()}.mp4`, offsetSeconds: 0, trimToShortest: true })
+      : videoFile;
+    rememberRecording(savedFile);
+    activeManifest.completedAt = new Date().toISOString();
+    activeManifest.finalFilePath = savedFile.filePath;
+    activeManifest.metadata = { ...activeManifest.metadata, separateCapture: { videoPath: videoFile.filePath, audioPath: audioFile?.filePath, mergedPath: savedFile.filePath, audioOffsetSeconds: 0, trimToShortest: Boolean(audioFile) } };
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+    setText("savedPath", savedFile.filePath);
+    setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
+    const mediaMeta = await window.videoBlitzerRecorder.mediaMetadata(savedFile.filePath);
+    renderMediaMetadata(mediaMeta);
+    updatePackageSummary();
+    setStatus("Saved locally");
+    setText("uploadStatus", audioFile ? "Saved synced MP4 from native screen/audio capture. Upload when ready." : "Saved native ScreenCaptureKit MP4 locally. Upload when ready.");
+    el<HTMLButtonElement>("openLocation").disabled = false;
+    el<HTMLButtonElement>("uploadRecording").disabled = false;
+    el<HTMLButtonElement>("startRecording").disabled = false;
+    showScreen("upload");
+  } catch (error) {
+    nativeScreenCaptureActive = false;
+    nativeScreenCapturePath = "";
+    setStatus("Save failed");
+    stopRecordingAudioMeter();
+    audioStream?.getTracks().forEach((track) => track.stop());
+    audioStream = null;
+    setText("uploadStatus", error instanceof Error ? `Could not finalize native recording: ${error.message}` : "Could not finalize native recording.");
+    el<HTMLButtonElement>("startRecording").disabled = false;
+  }
 }
 
 async function finishRecording() {
@@ -1594,7 +1720,8 @@ function updatePermissionStatus() {
 
 async function renderRecoveries() {
   const list = el("recoveryList");
-  const sessions = await window.videoBlitzerRecorder.listRecoverableSessions().catch(() => []);
+  const sessions = (await window.videoBlitzerRecorder.listRecoverableSessions().catch(() => []))
+    .filter((session) => (session.chunks ?? []).length && session.sessionId && session.createdAt);
   if (!sessions.length) { list.textContent = "No unfinished sessions found yet."; return; }
   list.innerHTML = "";
   for (const session of sessions) {

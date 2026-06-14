@@ -4,6 +4,7 @@
   "afterPack": "scripts/after-pack.cjs",
   "directories": { "output": "release", "buildResources": "build" },
   "files": ["dist/**/*", "package.json", "build/**/*"],
+  "extraResources": [{ "from": "dist/native/VideoBlitzerScreenCapture", "to": "native/VideoBlitzerScreenCapture" }],
   "asarUnpack": ["node_modules/ffmpeg-static/**/*", "node_modules/ffprobe-static/**/*"],
   "mac": {
     "target": [{ "target": "dmg", "arch": ["x64", "arm64"] }],

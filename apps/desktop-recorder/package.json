@@ -8,7 +8,7 @@
   "main": "dist/bootstrap.js",
   "scripts": {
     "dev": "npm run build && electron .",
-    "build": "tsc && tsc -p tsconfig.renderer.json && node scripts/copy-assets.mjs",
+    "build": "tsc && tsc -p tsconfig.renderer.json && node scripts/build-screen-helper.mjs && node scripts/copy-assets.mjs",
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "smoke:navigation": "node scripts/smoke-navigation.mjs",
