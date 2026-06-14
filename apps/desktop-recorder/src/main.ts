@@ -387,8 +387,10 @@ function createWindow() {
         if (smokeScreenshotPath) {
           (async () => {
             for (const screen of ["capture", "upload", "download", "advanced"]) {
+              if (window.isDestroyed()) return;
               await window.webContents.executeJavaScript(`document.querySelector('[data-screen="${screen}"]').click()`);
               await new Promise((resolve) => setTimeout(resolve, 250));
+              if (window.isDestroyed()) return;
               const image = await window.webContents.capturePage();
               const filePath = screenshotPathForScreen(screen);
               if (filePath) writeFileSync(filePath, image.toPNG());

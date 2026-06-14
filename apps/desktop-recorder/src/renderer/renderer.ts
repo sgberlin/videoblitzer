@@ -213,19 +213,24 @@ function startHealthMonitor(kind: "preview" | "recording", video: HTMLVideoEleme
     audioData = new Uint8Array(new ArrayBuffer(analyser.frequencyBinCount));
   }
   const interval = window.setInterval(() => {
-    const signal = sampleVideoSignal(video);
-    const videoStatus = !signal.ready
-      ? "video starting"
-      : signal.brightness > 8 || signal.contrast > 4
-        ? `video signal ok (${Math.round(signal.brightness)} brightness)`
-        : "video signal is very dark";
-    let audioStatus = audioTracks.length ? `${audioTracks.length} audio track(s)` : "no audio track";
-    if (analyser && audioData) {
-      analyser.getByteFrequencyData(audioData);
-      const average = audioData.reduce((sum, value) => sum + value, 0) / Math.max(audioData.length, 1);
-      audioStatus = average > 2 ? `audio signal ok (${Math.round(average)} level)` : "audio track present, low signal";
+    try {
+      const signal = sampleVideoSignal(video);
+      const videoStatus = !signal.ready
+        ? "video starting"
+        : signal.brightness > 8 || signal.contrast > 4
+          ? `video signal ok (${Math.round(signal.brightness)} brightness)`
+          : "video signal is very dark";
+      let audioStatus = audioTracks.length ? `${audioTracks.length} audio track(s)` : "no audio track";
+      if (analyser && audioData) {
+        analyser.getByteFrequencyData(audioData);
+        const average = audioData.reduce((sum, value) => sum + value, 0) / Math.max(audioData.length, 1);
+        audioStatus = average > 2 ? `audio signal ok (${Math.round(average)} level)` : "audio track present, low signal";
+      }
+      setText(statusId, `${kind === "preview" ? "Preview" : "Recording"} health: ${videoStatus}; ${audioStatus}.`);
+    } catch (error) {
+      setText(statusId, `${kind === "preview" ? "Preview" : "Recording"} health: unavailable.`);
+      startupLog("health monitor failed", { kind, message: error instanceof Error ? error.message : String(error) });
     }
-    setText(statusId, `${kind === "preview" ? "Preview" : "Recording"} health: ${videoStatus}; ${audioStatus}.`);
   }, 1000);
   if (kind === "preview") previewHealthInterval = interval;
   else recordingHealthInterval = interval;
@@ -1155,11 +1160,13 @@ async function renderRecoveries() {
   if (!sessions.length) { list.textContent = "No unfinished sessions found yet."; return; }
   list.innerHTML = "";
   for (const session of sessions) {
+    const sessionChunks = session.chunks ?? [];
     const node = document.createElement("div");
     node.className = "timeline-item";
-    node.innerHTML = `<strong>${session.mode} · ${session.createdAt}</strong><br><span>${session.sourceLabel ?? "Unknown source"} · ${session.chunks.length} chunks</span><br><button class="ghost-button">Recover recording</button>`;
+    node.innerHTML = `<strong>${session.mode} · ${session.createdAt}</strong><br><span>${session.sourceLabel ?? "Unknown source"} · ${sessionChunks.length} chunks</span><br><button class="ghost-button" ${sessionChunks.length ? "" : "disabled"}>Recover recording</button>`;
     node.querySelector("button")?.addEventListener("click", async () => {
       try {
+        if (!sessionChunks.length) throw new Error("This recovery manifest has no saved chunks.");
         const recovered = await window.videoBlitzerRecorder.recoverSession(session, settings.outputFolder);
         savedFile = recovered;
         rememberRecording(recovered);
@@ -1485,7 +1492,6 @@ async function init() {
     setText("micStatus", error instanceof Error ? `Microphones unavailable: ${error.message}` : "Microphones unavailable");
   });
   setText("micDeviceStatus", `Input: ${selectedMicLabel()}`);
-  void enableMicrophoneMonitoring();
   void refreshSources();
   void renderRecoveries();
   updatePermissionStatus();
