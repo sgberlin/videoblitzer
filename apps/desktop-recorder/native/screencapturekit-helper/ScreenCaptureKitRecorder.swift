@@ -13,6 +13,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
   private var stream: SCStream?
   private var writer: AVAssetWriter?
   private var input: AVAssetWriterInput?
+  private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
   private var firstPTS: CMTime?
   private var isStopping = false
 
@@ -52,6 +53,11 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     writer.add(input)
     self.writer = writer
     self.input = input
+    self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+      kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+      kCVPixelBufferWidthKey as String: width,
+      kCVPixelBufferHeightKey as String: height
+    ])
 
     let configuration = SCStreamConfiguration()
     configuration.width = width
@@ -102,13 +108,18 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
       return
     }
 
+    guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
     let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
     if firstPTS == nil {
       firstPTS = pts
       writer.startWriting()
-      writer.startSession(atSourceTime: pts)
+      writer.startSession(atSourceTime: .zero)
     }
-    input.append(sampleBuffer)
+    guard let firstPTS else { return }
+    let adjustedPTS = CMTimeSubtract(pts, firstPTS)
+    if adaptor?.append(imageBuffer, withPresentationTime: adjustedPTS) != true {
+      fputs("VIDEO_BLITZER_SCK_WARN frame append failed: \(writer.status.rawValue) \(writer.error?.localizedDescription ?? "unknown writer status")\n", stderr)
+    }
   }
 }
 

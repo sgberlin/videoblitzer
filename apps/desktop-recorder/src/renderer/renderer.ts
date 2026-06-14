@@ -693,6 +693,14 @@ function selectStableScreenSource() {
   return screenSource;
 }
 
+function nativeCaptureDisplaySource() {
+  return selectedSource?.kind === "screen" ? selectedSource : sources.find((source) => source.kind === "screen" || source.id.startsWith("screen")) ?? selectedSource;
+}
+
+function shouldUseNativeScreenCapture() {
+  return platformLabel === "darwin" || navigator.userAgent.includes("Mac");
+}
+
 function selectedCaptureAspect() {
   return (el<HTMLSelectElement>("captureAspect").value || "source") as CaptureAspect;
 }
@@ -1011,9 +1019,9 @@ async function startRecording() {
   try {
     if (!el<HTMLInputElement>("permissionConfirm").checked) throw new Error("Confirm that you are authorized to record this content before starting.");
     await saveSettings();
-    if (selectedMode === "screen" && !sources.some((source) => source.id.startsWith("screen"))) await refreshSources();
+    if (shouldUseNativeScreenCapture() && !sources.some((source) => source.kind === "screen" || source.id.startsWith("screen"))) await refreshSources();
     if (selectedMode === "screen") selectStableScreenSource();
-    if (selectedMode === "screen") {
+    if (shouldUseNativeScreenCapture()) {
       await startNativeScreenRecording();
       return;
     }
@@ -1118,10 +1126,11 @@ async function startNativeScreenRecording() {
   await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
   if (activeAudioManifest) await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
   const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
+  const displaySource = nativeCaptureDisplaySource();
   const started = await window.videoBlitzerRecorder.startNativeScreenCapture({
     outputFolder: settings.outputFolder,
     filename: `VideoBlitzer_ScreenCapture_${timestamp()}.mp4`,
-    displayId: selectedSource?.displayId,
+    displayId: displaySource?.displayId,
     frameRate,
   });
   nativeScreenCaptureActive = true;
@@ -1143,7 +1152,7 @@ async function startNativeScreenRecording() {
   el<HTMLButtonElement>("pauseRecording").disabled = true;
   el("recBadge").classList.add("active");
   setText("recordingHealthStatus", "Recording health: native ScreenCaptureKit capture active.");
-  setText("previewHealthStatus", "Preview health: native capture records directly to MP4.");
+  setText("previewHealthStatus", selectedSource?.kind === "screen" ? "Preview health: native capture records the selected display directly to MP4." : "Preview health: native capture records the full display to avoid black window frames.");
   updateMeter("videoSignalBar", "videoSignalMeter", 100, "native capture");
   updateMeter("videoBitrateBar", "videoBitrateMeter", 75, "native MP4");
   setStatus("Recording");
