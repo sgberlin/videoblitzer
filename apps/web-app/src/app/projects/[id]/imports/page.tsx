@@ -1,2 +1,8 @@
 import { ProjectWorkspaceClient } from "../ProjectWorkspaceClient";
-export default function Page({ params }: { params: { id: string } }) { return <ProjectWorkspaceClient projectId={params.id} tab="imports" />; }
+
+type ProjectPageProps = { params: Promise<{ id: string }> };
+
+export default async function Page({ params }: ProjectPageProps) {
+  const { id } = await params;
+  return <ProjectWorkspaceClient projectId={id} tab="imports" />;
+}

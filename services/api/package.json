@@ -30,7 +30,7 @@
   "devDependencies": {
     "@types/cors": "latest",
     "@types/express": "latest",
-    "esbuild": "latest",
+    "esbuild": "^0.28.1",
     "tsx": "latest",
     "typescript": "latest"
   }

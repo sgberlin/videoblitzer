@@ -16,8 +16,15 @@
     "lint": "npm run lint --workspaces",
     "typecheck": "npm run typecheck --workspaces"
   },
+  "overrides": {
+    "postcss": "8.5.15",
+    "next": {
+      "postcss": "8.5.15"
+    }
+  },
   "devDependencies": {
     "@types/node": "latest",
+    "postcss": "8.5.15",
     "typescript": "latest"
   }
 }
