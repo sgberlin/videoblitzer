@@ -524,7 +524,11 @@ app.whenReady().then(() => {
   ipcMain.handle("get-settings", readSettings);
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
   ipcMain.handle("get-sources", async () => {
-    const sources = await desktopCapturer.getSources({ types: ["screen", "window"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true });
+    const [screenSources, windowSources] = await Promise.all([
+      desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),
+      desktopCapturer.getSources({ types: ["window"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),
+    ]);
+    const sources = [...screenSources, ...windowSources];
     const displays = screen.getAllDisplays();
     return sources.map((source) => {
       const lower = source.name.toLowerCase();

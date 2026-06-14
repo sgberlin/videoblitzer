@@ -600,7 +600,19 @@ async function refreshSources() {
   }
   const list = el<HTMLDivElement>("sources");
   list.innerHTML = "";
-  const visibleSources = sources.filter((source) => sourceFilter === "browser" ? source.kind === "browser" : source.id.startsWith(sourceFilter));
+  const visibleSources = sources.filter((source) => {
+    if (sourceFilter === "screen") return source.kind === "screen" || source.id.startsWith("screen");
+    if (sourceFilter === "browser") return source.kind === "browser";
+    return source.kind !== "screen" && !source.id.startsWith("screen");
+  });
+  if (selectedSource && !visibleSources.some((source) => source.id === selectedSource?.id)) {
+    selectedSource = null;
+    stopPreviewStream();
+    setText("selectedSourceLabel", "No source selected");
+    setText("sourceStatus", sourceFilter === "screen" ? "Waiting" : "Select a window");
+    setText("previewHealthStatus", "Preview health: waiting for source.");
+    el("previewPlaceholder").textContent = sourceFilter === "screen" ? "Select a screen to preview your recording canvas." : "Select a window to preview your recording canvas.";
+  }
   updateDiagnostics();
   for (const source of visibleSources) {
     const card = document.createElement("button");
@@ -614,13 +626,14 @@ async function refreshSources() {
   }
   if (!visibleSources.length) {
     const label = sourceFilter === "screen" ? "screens" : sourceFilter === "browser" ? "browser windows" : "windows";
-    const help = sourceFilter === "screen" ? "Screen Recording is enabled only after macOS returns real screen sources. If you just enabled it, quit and reopen the recorder." : "Try refreshing sources or checking capture permissions.";
+    const help = sourceFilter === "screen" ? "Screen Recording is enabled only after macOS returns real screen sources. If you just enabled it, quit and reopen the recorder." : "If you just enabled Screen & System Audio Recording, quit and reopen the recorder. Also make sure the target app is open and not minimized.";
     list.innerHTML = `<div class="source-card"><strong>No ${label} found yet</strong><small>${help}</small></div>`;
   }
   const preferredScreen = sourceFilter === "screen" ? visibleSources.find((source) => source.id.startsWith("screen")) : null;
   const onlySource = visibleSources[0];
   if (preferredScreen && (!selectedSource || !selectedSource.id.startsWith("screen"))) selectSource(preferredScreen);
   else if (visibleSources.length === 1 && onlySource) selectSource(onlySource);
+  else el<HTMLButtonElement>("startRecording").disabled = sourceFilter === "screen" ? false : !selectedSource;
   if (sourceFilter === "screen" && !visibleSources.length) {
     setText("sourceStatus", "Waiting for macOS screen source");
     setText("selectedSourceLabel", "No screen returned by macOS yet");
@@ -628,6 +641,32 @@ async function refreshSources() {
     sourceRetryTimeout = window.setTimeout(() => void refreshSources(), 2000);
   }
   setStatus(visibleSources.length ? "Source selected" : "Idle");
+}
+
+function setSourceFilter(filter: typeof sourceFilter) {
+  sourceFilter = filter;
+  selectedMode = filter === "screen" ? "screen" : "browser";
+  const groupLabels: Record<typeof sourceFilter, string> = {
+    screen: "Full screen display",
+    window: "Open app windows",
+    browser: "Browser windows",
+  };
+  const modeLabels: Record<typeof sourceFilter, string> = {
+    screen: "Full-Screen Capture",
+    window: "Browser or App Window",
+    browser: "Browser or App Window",
+  };
+  setText("sourceGroupLabel", groupLabels[filter]);
+  setText("selectedModeLabel", modeLabels[filter]);
+  document.querySelectorAll(".mode-card").forEach((card) => {
+    const mode = (card as HTMLElement).dataset.mode;
+    card.classList.toggle("selected", filter === "screen" ? mode === "screen" : mode === "browser");
+  });
+  el("screenTab").classList.toggle("active", filter === "screen");
+  el("windowTab").classList.toggle("active", filter === "window");
+  el("browserTab").classList.toggle("active", filter === "browser");
+  renderMarkerButtons();
+  void refreshSources();
 }
 
 function selectSource(source: RecorderSource) {
@@ -1753,11 +1792,9 @@ function selectMode(mode: string) {
   setText("selectedModeLabel", modeLabels[mode] ?? label);
   document.querySelectorAll(".mode-card").forEach((card) => card.classList.toggle("selected", (card as HTMLElement).dataset.mode === mode));
   if (mode === "screen") {
-    sourceFilter = "screen";
-    el("screenTab").classList.add("active");
-    el("windowTab").classList.remove("active");
-    el("browserTab").classList.remove("active");
-    void refreshSources();
+    setSourceFilter("screen");
+  } else if (mode === "browser") {
+    setSourceFilter("window");
   }
   renderMarkerButtons();
 }
@@ -1810,9 +1847,9 @@ function setupPremiumInteractions() {
   }));
   startupLog("sidebar handlers attached", { count: document.querySelectorAll("[data-screen]").length });
   document.querySelectorAll(".mode-card").forEach((card) => card.addEventListener("click", () => selectMode((card as HTMLElement).dataset.mode ?? "browser")));
-  el("screenTab").addEventListener("click", () => { sourceFilter = "screen"; el("screenTab").classList.add("active"); el("windowTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
-  el("windowTab").addEventListener("click", () => { sourceFilter = "window"; el("windowTab").classList.add("active"); el("screenTab").classList.remove("active"); el("browserTab").classList.remove("active"); void refreshSources(); });
-  el("browserTab").addEventListener("click", () => { sourceFilter = "browser"; el("browserTab").classList.add("active"); el("screenTab").classList.remove("active"); el("windowTab").classList.remove("active"); void refreshSources(); });
+  el("screenTab").addEventListener("click", () => setSourceFilter("screen"));
+  el("windowTab").addEventListener("click", () => setSourceFilter("window"));
+  el("browserTab").addEventListener("click", () => setSourceFilter("browser"));
   el("pauseRecording").addEventListener("click", pauseOrResume);
   el("cancelUpload").addEventListener("click", () => activeUploadXhr?.abort());
   el("testMic").addEventListener("click", () => void testMicrophone());
