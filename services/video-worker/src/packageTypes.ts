@@ -27,6 +27,10 @@ export type ClipPlanItem = {
   endSeconds: number;
   label: string;
   note?: string;
+  confidence: number;
+  reason: string;
+  suggestedClipType: "quick_moment" | "short_highlight" | "story_highlight" | "extended_highlight";
+  platformFit: string[];
 };
 
 export type AnalysisResult = {
@@ -42,6 +46,16 @@ export type ExportArtifact = {
   width: number;
   height: number;
   target: string;
+  assetType: "master" | "full_export" | "clip" | "thumbnail" | "caption" | "metadata" | "zip" | "readme";
+  platform?: string;
+  clipId?: string;
+  durationSeconds?: number;
+  aspectRatio?: string;
+  startSeconds?: number;
+  endSeconds?: number;
+  confidence?: number;
+  validationStatus?: "pending" | "valid" | "failed";
+  metadata?: Record<string, unknown>;
 };
 
 export type SelectedPreset = ExportPreset;
@@ -59,5 +73,6 @@ export type PackageManifest = {
   };
   clipPlan: ClipPlanItem[];
   exports: ExportArtifact[];
+  assets: ExportArtifact[];
   socialPackage: Record<string, unknown>;
 };

@@ -72,11 +72,15 @@ jobsRouter.post("/:id/retry", async (req, res) => {
         artifact_object_key: null,
         output: {},
         manifest_json: {},
+        stage: "queued",
+        stage_started_at: new Date().toISOString(),
+        last_heartbeat_at: null,
         updated_at: new Date().toISOString(),
       })
       .eq("id", req.params.id)
       .eq("user_id", req.user!.id)
       .eq("status", "failed");
+    await supabase.from("package_assets").delete().eq("package_job_id", req.params.id).eq("user_id", req.user!.id);
   }
   return res.json({ job: data });
 });

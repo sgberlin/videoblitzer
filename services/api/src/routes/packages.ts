@@ -22,7 +22,7 @@ async function latestOwnedVideoForProject(userId: string, projectId: string) {
   if (!supabase) throw new Error("Supabase service role is required.");
   const { data, error } = await supabase
     .from("videos")
-    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type")
+    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes")
     .eq("project_id", projectId)
     .eq("owner_id", userId)
     .order("created_at", { ascending: false })
@@ -41,6 +41,13 @@ packagesRouter.post("/generate", async (req, res) => {
     : await latestOwnedVideoForProject(req.user!.id, body.projectId);
   if (!video) return res.status(404).json({ error: "No uploaded video is available for this project yet." });
   if (video.project_id !== body.projectId) return res.status(400).json({ error: "Selected video does not belong to the requested project." });
+  if (video.verification_status !== "verified") {
+    return res.status(409).json({
+      error: "Upload must be verified before producing a package.",
+      code: "upload_not_verified",
+      verificationStatus: video.verification_status ?? "unverified",
+    });
+  }
 
   const sourceObjectKey = video.storage_key ?? video.source_object_key;
   if (!sourceObjectKey) return res.status(400).json({ error: "Video source object key is missing." });
@@ -74,6 +81,8 @@ packagesRouter.post("/generate", async (req, res) => {
     sourceObjectKey,
     sourceFormat,
     sourceMimeType: mimeType,
+      verifiedAt: video.verified_at,
+      verifiedSizeBytes: video.verified_size_bytes,
     presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
     includeClipPlan: body.includeClipPlan,
   };
@@ -129,10 +138,14 @@ packagesRouter.post("/generate", async (req, res) => {
 packagesRouter.get("/:id", async (req, res) => {
   const supabase = createServiceClient();
   if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
-  const { data, error } = await supabase.from("package_jobs").select("*").eq("id", req.params.id).eq("user_id", req.user!.id).maybeSingle();
+  const [{ data, error }, assets] = await Promise.all([
+    supabase.from("package_jobs").select("*").eq("id", req.params.id).eq("user_id", req.user!.id).maybeSingle(),
+    supabase.from("package_assets").select("*").eq("package_job_id", req.params.id).eq("user_id", req.user!.id).order("created_at", { ascending: true }),
+  ]);
   if (error) return res.status(500).json({ error: error.message });
+  if (assets.error) return res.status(500).json({ error: assets.error.message });
   if (!data) return res.status(404).json({ error: "Package job not found" });
-  return res.json({ packageJob: data });
+  return res.json({ packageJob: data, assets: assets.data ?? [] });
 });
 
 packagesRouter.get("/:id/download", async (req, res) => {
@@ -174,6 +187,9 @@ packagesRouter.post("/:id/retry", async (req, res) => {
       artifact_object_key: null,
       output: {},
       manifest_json: {},
+      stage: "queued",
+      stage_started_at: new Date().toISOString(),
+      last_heartbeat_at: null,
       updated_at: new Date().toISOString(),
     })
     .eq("id", req.params.id)
@@ -181,6 +197,7 @@ packagesRouter.post("/:id/retry", async (req, res) => {
     .select("*")
     .maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
+  await supabase.from("package_assets").delete().eq("package_job_id", req.params.id).eq("user_id", req.user!.id);
 
   await supabase
     .from("jobs")
@@ -188,6 +205,7 @@ packagesRouter.post("/:id/retry", async (req, res) => {
     .eq("id", req.params.id)
     .eq("user_id", req.user!.id)
     .eq("type", "social_content_pack");
+  await supabase.rpc("write_audit_log", { p_actor_id: req.user!.id, p_action: "package_job_retry", p_target_type: "package_job", p_target_id: req.params.id, p_metadata: { projectId: existing.project_id, attempts: existing.attempts ?? 0 } });
 
   return res.json({ packageJob: data });
 });

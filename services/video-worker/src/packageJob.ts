@@ -1,17 +1,19 @@
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, mkdir, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { analyzeStage } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
-import { createNormalizedMaster, exportStage } from "./exportStage";
-import { downloadR2File, uploadFileToR2 } from "./packageStorage";
+import { createNormalizedMaster, exportStage, socialClipStage } from "./exportStage";
+import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
 import type { ExportArtifact, PackageJob, PackageManifest, PackageStatus, VideoRow } from "./packageTypes";
 
 const workerId = `package-${process.pid}-${randomUUID()}`;
 const maxAttempts = Number(process.env.PACKAGE_WORKER_MAX_ATTEMPTS ?? process.env.VIDEO_WORKER_MAX_ATTEMPTS ?? 3);
 const packageCreditCost = Number(process.env.PACKAGE_WORKER_SOCIAL_CONTENT_PACK_COST ?? 5);
+const stageTimeoutMinutes = Number(process.env.PACKAGE_WORKER_STAGE_TIMEOUT_MINUTES ?? 240);
+type ExportArtifactWithPath = ExportArtifact & { filePath: string };
 
 function serviceKey() {
   return process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_SECRET_KEY;
@@ -38,6 +40,7 @@ async function updatePackageState(
     updated_at: now,
     locked_at: status === "processing" ? patch.locked_at ?? now : null,
     worker_id: status === "processing" ? patch.worker_id ?? workerId : null,
+    last_heartbeat_at: status === "processing" ? now : patch.last_heartbeat_at ?? null,
     ...(status === "completed" ? { completed_at: now } : {}),
     ...patch,
   };
@@ -59,14 +62,36 @@ async function updatePackageState(
 }
 
 async function markStage(client: WorkerClient, job: PackageJob, stage: string, progress: number, extra: Record<string, unknown> = {}) {
+  const now = new Date().toISOString();
   await updatePackageState(client, job.id, "processing", {
     progress,
+    stage,
+    stage_started_at: now,
+    last_heartbeat_at: now,
+    deadline_at: new Date(Date.now() + stageTimeoutMinutes * 60_000).toISOString(),
     output: {
       stage,
-      stageUpdatedAt: new Date().toISOString(),
+      stageUpdatedAt: now,
       ...extra,
     },
   });
+}
+
+async function heartbeat(client: WorkerClient, job: PackageJob, stage: string) {
+  const now = new Date().toISOString();
+  await client.from("package_jobs").update({ last_heartbeat_at: now, locked_at: now, stage, updated_at: now }).eq("id", job.id);
+}
+
+async function withHeartbeat<T>(client: WorkerClient, job: PackageJob, stage: string, operation: () => Promise<T>) {
+  const everyMs = Number(process.env.PACKAGE_WORKER_HEARTBEAT_MS ?? 60_000);
+  const interval = setInterval(() => {
+    void heartbeat(client, job, stage).catch((error) => console.error("[package-worker] heartbeat failed", error instanceof Error ? error.message : error));
+  }, everyMs);
+  try {
+    return await operation();
+  } finally {
+    clearInterval(interval);
+  }
 }
 
 async function refundPackageCreditIfTerminal(client: WorkerClient, job: PackageJob, attempts: number, reason: string) {
@@ -202,6 +227,7 @@ async function cleanupPreviousPackageRows(client: WorkerClient, job: PackageJob)
     client.from("clip_jobs").delete().eq("project_id", job.project_id).eq("user_id", job.user_id).contains("metadata", { packageJobId: job.id }),
     client.from("exports").delete().eq("project_id", job.project_id).eq("user_id", job.user_id).contains("metadata", { packageJobId: job.id }),
     client.from("social_packages").delete().eq("project_id", job.project_id).eq("user_id", job.user_id).contains("content", { packageJobId: job.id }),
+    client.from("package_assets").delete().eq("package_job_id", job.id).eq("user_id", job.user_id),
   ]);
 }
 
@@ -247,6 +273,132 @@ async function persistExports(client: WorkerClient, job: PackageJob, artifacts: 
   if (error) throw new Error(error.message);
 }
 
+async function persistPackageAssets(client: WorkerClient, job: PackageJob, assets: ExportArtifact[]) {
+  if (!assets.length) return;
+  const { error } = await client.from("package_assets").insert(assets.map((asset) => ({
+    id: randomUUID(),
+    package_job_id: job.id,
+    project_id: job.project_id,
+    video_id: job.video_id,
+    user_id: job.user_id,
+    asset_type: asset.assetType,
+    platform: asset.platform,
+    clip_id: asset.clipId,
+    preset_id: asset.presetId,
+    storage_key: asset.objectKey,
+    filename: asset.fileName,
+    content_type: asset.assetType === "thumbnail" ? "image/jpeg" : asset.assetType === "caption" ? "text/plain" : asset.assetType === "metadata" || asset.assetType === "readme" ? "application/json" : asset.assetType === "zip" ? "application/zip" : "video/mp4",
+    duration_seconds: asset.durationSeconds,
+    width: asset.width,
+    height: asset.height,
+    aspect_ratio: asset.aspectRatio,
+    start_seconds: asset.startSeconds,
+    end_seconds: asset.endSeconds,
+    confidence: asset.confidence,
+    validation_status: asset.validationStatus ?? "pending",
+    metadata: asset.metadata ?? {},
+  })));
+  if (error) throw new Error(error.message);
+}
+
+async function validateR2Assets<T extends ExportArtifact>(assets: T[]) {
+  const checked: T[] = [];
+  for (const asset of assets) {
+    const r2 = await verifyR2File(asset.objectKey);
+    checked.push({
+      ...asset,
+      validationStatus: r2.exists && (r2.sizeBytes ?? 0) > 0 ? "valid" : "failed",
+      metadata: { ...(asset.metadata ?? {}), r2SizeBytes: r2.sizeBytes, r2ContentType: r2.contentType },
+    } as T);
+  }
+  const failed = checked.filter((asset) => asset.validationStatus === "failed");
+  if (failed.length) throw new Error(`Package asset validation failed for ${failed.map((asset) => asset.fileName).join(", ")}`);
+  return checked;
+}
+
+function srtTimestamp(seconds: number) {
+  const safe = Math.max(0, seconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const wholeSeconds = Math.floor(safe % 60);
+  const millis = Math.round((safe - Math.floor(safe)) * 1000);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+
+function hookCaption(clip: PackageManifest["clipPlan"][number]) {
+  if (clip.confidence < 0.5) return "Candidate highlight - review before posting.";
+  if (clip.suggestedClipType === "quick_moment") return "Big moment. Watch this.";
+  if (clip.suggestedClipType === "short_highlight") return "Game-changing moment.";
+  if (clip.suggestedClipType === "story_highlight") return "Clean build-up. Strong finish.";
+  return "Full sequence from the match.";
+}
+
+async function createTextAssets(input: {
+  workdir: string;
+  job: PackageJob;
+  clipPlan: PackageManifest["clipPlan"];
+  socialPackage: Record<string, unknown>;
+}) {
+  const assets: ExportArtifactWithPath[] = [];
+  const captionsDir = path.join(input.workdir, "captions", "srt");
+  const metadataDir = path.join(input.workdir, "metadata");
+  await mkdir(captionsDir, { recursive: true });
+  await mkdir(metadataDir, { recursive: true });
+
+  for (const clip of input.clipPlan) {
+    const caption = hookCaption(clip);
+    const srt = `1\n${srtTimestamp(0)} --> ${srtTimestamp(Math.min(clip.endSeconds - clip.startSeconds, 6))}\n${caption}\n`;
+    const captionName = `${clip.id}.srt`;
+    const captionPath = path.join(captionsDir, captionName);
+    await writeFile(captionPath, srt, "utf8");
+    const captionKey = `packages/assets/${input.job.user_id}/${input.job.project_id}/${input.job.id}/captions/srt/${captionName}`;
+    await uploadFileToR2(captionPath, captionKey, "text/plain");
+    assets.push({
+      presetId: "srt_caption",
+      label: `Caption ${clip.label}`,
+      objectKey: captionKey,
+      fileName: captionName,
+      filePath: captionPath,
+      width: 0,
+      height: 0,
+      target: "Captions",
+      assetType: "caption",
+      platform: "all",
+      clipId: clip.id,
+      durationSeconds: clip.endSeconds - clip.startSeconds,
+      startSeconds: clip.startSeconds,
+      endSeconds: clip.endSeconds,
+      confidence: clip.confidence,
+      aspectRatio: "text",
+      validationStatus: "pending",
+      metadata: { folder: "captions/srt", captionType: "social_hook", spokenCaptionsAvailable: false },
+    });
+  }
+
+  const metadataName = "social-media-text.json";
+  const metadataPath = path.join(metadataDir, metadataName);
+  await writeFile(metadataPath, JSON.stringify(input.socialPackage, null, 2), "utf8");
+  const metadataKey = `packages/assets/${input.job.user_id}/${input.job.project_id}/${input.job.id}/metadata/${metadataName}`;
+  await uploadFileToR2(metadataPath, metadataKey, "application/json");
+  assets.push({
+    presetId: "social_metadata",
+    label: "Social media text and captions",
+    objectKey: metadataKey,
+    fileName: metadataName,
+    filePath: metadataPath,
+    width: 0,
+    height: 0,
+    target: "Metadata",
+    assetType: "metadata",
+    platform: "all",
+    aspectRatio: "json",
+    validationStatus: "pending",
+    metadata: { folder: "metadata" },
+  });
+
+  return assets;
+}
+
 async function persistSocialPackage(client: WorkerClient, job: PackageJob, content: Record<string, unknown>) {
   const { error } = await client.from("social_packages").insert({
     id: randomUUID(),
@@ -267,10 +419,25 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
       startSeconds: clip.startSeconds,
       endSeconds: clip.endSeconds,
       title: clip.label,
+      confidence: clip.confidence,
+      reason: clip.reason,
     })),
+    captions: clipPlan.map((clip) => ({ clipId: clip.id, caption: hookCaption(clip), hashtags: ["#sports", "#highlights", "#fullgame", "#videoblitzer"] })),
+    platformStandards: {
+      instagramReels: "9:16 1080x1920, 15-60 sec, burned captions recommended.",
+      tiktok: "9:16 1080x1920, 15-60 sec, strong hook caption.",
+      youtubeShorts: "9:16 1080x1920, under 60 sec.",
+      youtubeStandard: "16:9 1920x1080 landscape highlight/full export.",
+      facebookReels: "9:16, captions recommended.",
+      xTwitter: "Short caption text and clipped MP4 assets.",
+    },
     packageSummary: `Generated ${exports.length} preset exports and ${clipPlan.length} planned clips.`,
     complianceNote: "Generated from project-owned media and factual timeline markers.",
   };
+}
+
+function readmeForPackage(manifest: PackageManifest) {
+  return `VideoBlitzer Social Media Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nFolders:\n- clips/vertical_9x16: Instagram Reels, TikTok, YouTube Shorts, Facebook Reels\n- clips/landscape_16x9: YouTube standard and landscape assets\n- clips/square_1x1: optional square social clips\n- captions/srt: social hook caption files\n- thumbnails: preview images\n- metadata: titles, descriptions, captions, hashtags\n- manifest.json: machine-readable package details\n\nQuality note:\nCandidate clips include confidence scores and reasons. Low-confidence clips should be reviewed before posting.\n`;
 }
 
 async function processPackageJob(client: WorkerClient, job: PackageJob) {
@@ -287,34 +454,65 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     await mkdir(exportsDir, { recursive: true });
 
     await markStage(client, job, "download_source", 15, { sourceObjectKey });
-    await downloadR2File(sourceObjectKey, sourcePath);
+    await withHeartbeat(client, job, "download_source", () => downloadR2File(sourceObjectKey, sourcePath));
 
     await markStage(client, job, "normalize_master", 25);
-    await createNormalizedMaster(sourcePath, normalizedMasterPath);
+    await withHeartbeat(client, job, "normalize_master", () => createNormalizedMaster(sourcePath, normalizedMasterPath));
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
+    const masterAsset: ExportArtifactWithPath = {
+      presetId: "normalized_master",
+      label: "Normalized master reference",
+      objectKey: masterObjectKey,
+      fileName: "normalized-master.mp4",
+      filePath: normalizedMasterPath,
+      width: 1920,
+      height: 1080,
+      target: "Master",
+      assetType: "master",
+      platform: "all",
+      aspectRatio: "source",
+      validationStatus: "pending",
+      metadata: { folder: "master" },
+    };
 
     await markStage(client, job, "analyze", 40);
-    const analysis = await analyzeStage(normalizedMasterPath, video.markers ?? []);
+    const analysis = await withHeartbeat(client, job, "analyze", () => analyzeStage(normalizedMasterPath, video.markers ?? []));
     await persistClipPlan(client, job, analysis.clipPlan);
 
-    await markStage(client, job, "preset_exports", 65, { clipPlanCount: analysis.clipPlan.length });
+    await markStage(client, job, "rendering_clips", 55, { clipPlanCount: analysis.clipPlan.length });
+    const { clipArtifacts, thumbnailArtifacts } = await withHeartbeat(client, job, "rendering_clips", () => socialClipStage({
+      masterPath: normalizedMasterPath,
+      workdir,
+      clipPlan: analysis.clipPlan,
+      userId: job.user_id,
+      projectId: job.project_id,
+      packageJobId: job.id,
+    }));
+
+    await markStage(client, job, "preset_exports", 70, { clipAssetCount: clipArtifacts.length });
     const requestedPresetIds = Array.isArray(job.input?.presetIds) ? (job.input?.presetIds as string[]) : [];
-    const exportArtifactsWithPaths = await exportStage({
+    const exportArtifactsWithPaths = await withHeartbeat(client, job, "preset_exports", () => exportStage({
       masterPath: normalizedMasterPath,
       exportsDir,
       requestedPresetIds,
       userId: job.user_id,
       projectId: job.project_id,
       packageJobId: job.id,
-    });
+    }));
     const exportArtifacts = exportArtifactsWithPaths.map(({ filePath: _filePath, ...artifact }) => artifact);
     await persistExports(client, job, exportArtifacts);
 
     const socialPackage = socialContentForPackage(job, analysis.clipPlan, exportArtifacts);
+    const textAssets = await createTextAssets({ workdir, job, clipPlan: analysis.clipPlan, socialPackage });
     await persistSocialPackage(client, job, socialPackage);
 
-    await markStage(client, job, "bundle_artifact", 85, { exportCount: exportArtifacts.length });
+    await markStage(client, job, "validating_assets", 82, { exportCount: exportArtifacts.length, clipAssetCount: clipArtifacts.length });
+    const assetsWithPaths = [masterAsset, ...exportArtifactsWithPaths, ...clipArtifacts, ...thumbnailArtifacts, ...textAssets];
+    const validatedAssets = await validateR2Assets(assetsWithPaths);
+    await persistPackageAssets(client, job, validatedAssets.map(({ filePath: _filePath, ...asset }) => asset));
+
+    await markStage(client, job, "building_zip", 90, { assetCount: validatedAssets.length });
     const manifest: PackageManifest = {
       packageJobId: job.id,
       projectId: job.project_id,
@@ -325,20 +523,40 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       normalizedMaster: { objectKey: masterObjectKey, fileName: "normalized-master.mp4" },
       clipPlan: analysis.clipPlan,
       exports: exportArtifacts,
+      assets: validatedAssets.map(({ filePath: _filePath, ...asset }) => asset),
       socialPackage,
     };
-    const { zipPath } = await bundleStage({
+    const { zipPath } = await withHeartbeat(client, job, "building_zip", () => bundleStage({
       workdir,
       manifest,
       normalizedMasterPath,
       exports: exportArtifactsWithPaths,
-    });
+      assets: [...clipArtifacts, ...thumbnailArtifacts, ...textAssets],
+      readmeText: readmeForPackage(manifest),
+    }));
     const artifactObjectKey = await uploadPackageZip({
       zipPath,
       userId: job.user_id,
       projectId: job.project_id,
       packageJobId: job.id,
     });
+    const zipValidation = await verifyR2File(artifactObjectKey);
+    if (!zipValidation.exists || (zipValidation.sizeBytes ?? 0) <= 0) throw new Error("Package ZIP validation failed after upload.");
+    const zipAsset: ExportArtifact = {
+      presetId: "social_package_zip",
+      label: "Download Package ZIP",
+      objectKey: artifactObjectKey,
+      fileName: "social-package.zip",
+      width: 0,
+      height: 0,
+      target: "Package",
+      assetType: "zip",
+      platform: "all",
+      aspectRatio: "zip",
+      validationStatus: "valid",
+      metadata: { r2SizeBytes: zipValidation.sizeBytes, r2ContentType: zipValidation.contentType },
+    };
+    await persistPackageAssets(client, job, [zipAsset]);
 
     const output = {
       stage: "completed",
@@ -347,6 +565,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       normalizedMasterObjectKey: masterObjectKey,
       exportCount: exportArtifacts.length,
       clipPlanCount: analysis.clipPlan.length,
+      assetCount: validatedAssets.length + 1,
       exports: exportArtifacts,
     };
     await updatePackageState(client, job.id, "completed", {

@@ -157,9 +157,27 @@ export async function processOneImportJob(client: SupabaseClient) {
       source_url: job.source_url,
       permission_confirmed: true,
       size_bytes: importedBytes || undefined,
+      verification_status: "verified",
+      verified_at: new Date().toISOString(),
+      verified_size_bytes: importedBytes || undefined,
+      verified_content_type: contentType,
+      verification_metadata: { mode: "direct_import_worker", objectKey, importJobId: job.id },
       import_metadata: { importJobId: job.id, sourceUrl: job.source_url, contentLength: importedBytes, contentType },
       conversion_status: needsConversion ? "queued" : "not_requested",
       status: "uploaded",
+    });
+    await client.from("upload_verifications").insert({
+      user_id: job.user_id,
+      project_id: job.project_id,
+      video_id: videoId,
+      object_key: objectKey,
+      expected_size_bytes: importedBytes || undefined,
+      verified_size_bytes: importedBytes || undefined,
+      expected_content_type: contentType,
+      verified_content_type: contentType,
+      status: "verified",
+      metadata: { mode: "direct_import_worker", importJobId: job.id },
+      verified_at: new Date().toISOString(),
     });
     await client.from("projects").update({ status: "uploaded", source_type: "direct_media_url", source_url: job.source_url, permission_confirmed: true, updated_at: new Date().toISOString(), import_metadata: { importJobId: job.id, sourceUrl: job.source_url } }).eq("id", job.project_id).eq("owner_id", job.user_id);
     await client.from("usage_events").insert({ user_id: job.user_id, project_id: job.project_id, event_name: "direct_url_import_completed", metadata: { importJobId: job.id, sourceUrl: job.source_url, objectKey, contentLength: importedBytes, contentType } });

@@ -16,8 +16,10 @@ export async function createPackageZip(input: {
   manifest: PackageManifest;
   clipPlanPath: string;
   manifestPath: string;
+  readmePath: string;
   normalizedMasterPath: string;
   exports: ExportArtifactWithPath[];
+  assets: ExportArtifactWithPath[];
 }) {
   await mkdir(path.dirname(input.outputPath), { recursive: true });
   await writeJson(input.clipPlanPath, input.manifest.clipPlan);
@@ -33,10 +35,15 @@ export async function createPackageZip(input: {
     archive.pipe(output);
     archive.file(input.normalizedMasterPath, { name: `master/${input.manifest.normalizedMaster.fileName}` });
     for (const artifact of input.exports) {
-      archive.file(artifact.filePath, { name: `exports/${artifact.fileName}` });
+      archive.file(artifact.filePath, { name: `clips/landscape_16x9/${artifact.fileName}` });
+    }
+    for (const asset of input.assets) {
+      const folder = typeof asset.metadata?.folder === "string" ? asset.metadata.folder : asset.assetType === "thumbnail" ? "thumbnails" : asset.assetType === "caption" ? "captions/srt" : asset.assetType === "metadata" ? "metadata" : "metadata";
+      archive.file(asset.filePath, { name: `${folder}/${asset.fileName}` });
     }
     archive.file(input.clipPlanPath, { name: "clip_plan.json" });
     archive.file(input.manifestPath, { name: "manifest.json" });
+    archive.file(input.readmePath, { name: "README.txt" });
     void archive.finalize();
   });
 }
@@ -46,15 +53,21 @@ export async function bundleStage(input: {
   manifest: PackageManifest;
   normalizedMasterPath: string;
   exports: ExportArtifactWithPath[];
+  assets: ExportArtifactWithPath[];
+  readmeText: string;
 }) {
   const zipPath = path.join(input.workdir, "package.zip");
+  const readmePath = path.join(input.workdir, "README.txt");
+  await writeFile(readmePath, input.readmeText, "utf8");
   await createPackageZip({
     outputPath: zipPath,
     manifest: input.manifest,
     clipPlanPath: path.join(input.workdir, "clip_plan.json"),
     manifestPath: path.join(input.workdir, "manifest.json"),
+    readmePath,
     normalizedMasterPath: input.normalizedMasterPath,
     exports: input.exports,
+    assets: input.assets,
   });
   return { zipPath };
 }

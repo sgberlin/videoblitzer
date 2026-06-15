@@ -23,6 +23,114 @@ function sourceFormatForContentType(contentType: string): typeof sourceFormats[n
   return "mp4";
 }
 
+const uploadVerificationSchema = z.object({
+  projectId: z.string().uuid().optional(),
+  project_id: z.string().uuid().optional(),
+  videoId: z.string().uuid().optional(),
+  video_id: z.string().uuid().optional(),
+  storageKey: z.string().optional(),
+  object_key: z.string().optional(),
+  contentType: z.enum(allowedTypes).optional(),
+  content_type: z.enum(allowedTypes).optional(),
+  sizeBytes: z.number().optional(),
+  size_bytes: z.number().optional(),
+});
+
+async function verifyUploadedObjectForUser(input: {
+  userId: string;
+  projectId: string;
+  videoId?: string;
+  storageKey: string;
+  contentType?: string;
+  sizeBytes?: number;
+}) {
+  if (!await userOwnsProject(input.userId, input.projectId)) throw Object.assign(new Error("Project not found"), { statusCode: 404 });
+  if (!isExpectedRawUploadKey(input.userId, input.projectId, input.storageKey)) throw Object.assign(new Error("Upload object key does not match the authenticated project."), { statusCode: 400, code: "invalid_upload_key" });
+  const r2Object = await verifyR2Object(input.storageKey);
+  if (!r2Object.exists) throw Object.assign(new Error("Uploaded object was not found in R2. Retry the upload before producing a package."), { statusCode: 400, code: "missing_uploaded_object" });
+  if (typeof input.sizeBytes === "number" && r2Object.sizeBytes !== null && Math.abs(r2Object.sizeBytes - input.sizeBytes) > 1) {
+    throw Object.assign(new Error("Uploaded object size does not match the expected size."), { statusCode: 400, code: "upload_size_mismatch" });
+  }
+  if (input.contentType && r2Object.contentType && r2Object.contentType !== input.contentType) {
+    throw Object.assign(new Error("Uploaded object content type does not match the expected content type."), { statusCode: 400, code: "upload_content_type_mismatch" });
+  }
+  return r2Object;
+}
+
+uploadsRouter.post("/verify", async (req, res) => {
+  const body = uploadVerificationSchema.parse(req.body);
+  const projectId = body.projectId ?? body.project_id;
+  const videoId = body.videoId ?? body.video_id;
+  const storageKey = body.storageKey ?? body.object_key;
+  const contentType = body.contentType ?? body.content_type;
+  const sizeBytes = body.sizeBytes ?? body.size_bytes;
+  if (!projectId || !storageKey) return res.status(400).json({ error: "project_id and object_key are required" });
+  const supabase = createServiceClient();
+  if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
+
+  try {
+    const r2Object = await verifyUploadedObjectForUser({ userId: req.user!.id, projectId, videoId, storageKey, contentType, sizeBytes });
+    const verifiedAt = new Date().toISOString();
+    const verification = {
+      id: crypto.randomUUID(),
+      user_id: req.user!.id,
+      project_id: projectId,
+      video_id: videoId,
+      object_key: storageKey,
+      expected_size_bytes: sizeBytes,
+      verified_size_bytes: r2Object.sizeBytes,
+      expected_content_type: contentType,
+      verified_content_type: r2Object.contentType,
+      status: "verified",
+      metadata: { mode: r2Object.exists ? "head_object" : "missing" },
+      verified_at: verifiedAt,
+    };
+    const { error: verificationError } = await supabase.from("upload_verifications").insert(verification);
+    if (verificationError) throw new Error(verificationError.message);
+    if (videoId) {
+      await supabase
+        .from("videos")
+        .update({
+          verification_status: "verified",
+          verified_at: verifiedAt,
+          verified_size_bytes: r2Object.sizeBytes,
+          verified_content_type: r2Object.contentType,
+          verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes },
+        })
+        .eq("id", videoId)
+        .eq("owner_id", req.user!.id);
+    }
+    await supabase.rpc("write_audit_log", {
+      p_actor_id: req.user!.id,
+      p_action: "upload_verified",
+      p_target_type: videoId ? "video" : "upload_object",
+      p_target_id: videoId ?? storageKey,
+      p_metadata: { projectId, storageKey, expectedSizeBytes: sizeBytes, verifiedSizeBytes: r2Object.sizeBytes },
+    });
+    return res.json({
+      ok: true,
+      state: "complete",
+      message: "Upload verified. Ready to produce package.",
+      verification,
+      r2Object,
+    });
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number" ? (error as { statusCode: number }).statusCode : 500;
+    const code = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "upload_verification_failed";
+    await supabase.from("upload_verifications").insert({
+      user_id: req.user!.id,
+      project_id: projectId,
+      video_id: videoId,
+      object_key: storageKey,
+      expected_size_bytes: sizeBytes,
+      expected_content_type: contentType,
+      status: "failed",
+      error_message: error instanceof Error ? error.message : "Upload verification failed.",
+    });
+    return res.status(statusCode).json({ error: error instanceof Error ? error.message : "Upload verification failed.", code });
+  }
+});
+
 uploadsRouter.post("/create-signed-url", async (req, res) => {
   const body = z.object({ filename: z.string().min(1), contentType: z.enum(allowedTypes), projectId: z.string().uuid() }).parse(req.body);
   const supabase = createServiceClient();
@@ -70,15 +178,16 @@ uploadsRouter.post("/complete", async (req, res) => {
   const storageKey = body.storageKey ?? body.object_key;
   const sizeBytes = body.sizeBytes ?? body.size_bytes;
   if (!projectId || !contentType || !storageKey) return res.status(400).json({ error: "project_id, object_key, and content_type are required" });
-  const ownsProject = await userOwnsProject(req.user!.id, projectId);
-  if (!ownsProject) return res.status(404).json({ error: "Project not found" });
-  if (!isExpectedRawUploadKey(req.user!.id, projectId, storageKey)) return res.status(400).json({ error: "Upload object key does not match the authenticated project." });
   const supabase = createServiceClient();
   if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
-  const r2Object = await verifyR2Object(storageKey);
-  if (!r2Object.exists) return res.status(400).json({ error: "Uploaded object was not found in R2. Retry the upload before completing it.", code: "missing_uploaded_object" });
-  if (typeof sizeBytes === "number" && r2Object.sizeBytes !== null && Math.abs(r2Object.sizeBytes - sizeBytes) > 1) return res.status(400).json({ error: "Uploaded object size does not match the completion request.", code: "upload_size_mismatch" });
-  if (r2Object.contentType && r2Object.contentType !== contentType) return res.status(400).json({ error: "Uploaded object content type does not match the completion request.", code: "upload_content_type_mismatch" });
+  let r2Object: Awaited<ReturnType<typeof verifyR2Object>>;
+  try {
+    r2Object = await verifyUploadedObjectForUser({ userId: req.user!.id, projectId, storageKey, contentType, sizeBytes });
+  } catch (error) {
+    const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number" ? (error as { statusCode: number }).statusCode : 500;
+    const code = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "upload_verification_failed";
+    return res.status(statusCode).json({ error: error instanceof Error ? error.message : "Upload verification failed.", code });
+  }
   const permissionConfirmedAt = body.permission_confirmed ? body.permission_confirmed_at ?? new Date().toISOString() : undefined;
   const sourceFormat = body.raw_format ?? sourceFormatForContentType(contentType);
   const desiredExportFormat = sourceFormat === "webm" ? body.desired_export_format ?? "mp4" : body.desired_export_format;
@@ -94,13 +203,16 @@ uploadsRouter.post("/complete", async (req, res) => {
     }
     charged.push({ action: "video_conversion_mp4", cost: conversionCredit.cost });
   }
-  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: sourceFormat, desired_export_format: desiredExportFormat, size_bytes: sizeBytes, status: "uploaded", recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, duration_seconds: body.duration_seconds, conversion_status: needsMp4Conversion ? "queued" : "not_requested" };
+  const verifiedAt = new Date().toISOString();
+  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: sourceFormat, desired_export_format: desiredExportFormat, size_bytes: sizeBytes, status: "uploaded", verification_status: "verified", verified_at: verifiedAt, verified_size_bytes: r2Object.sizeBytes, verified_content_type: r2Object.contentType, verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes }, recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, duration_seconds: body.duration_seconds, conversion_status: needsMp4Conversion ? "queued" : "not_requested" };
   let conversionJob = null;
   try {
     const { error } = await supabase.from("videos").insert(video);
     if (error) throw new Error(error.message);
+    await supabase.from("upload_verifications").insert({ id: crypto.randomUUID(), user_id: req.user!.id, project_id: projectId, video_id: video.id, object_key: storageKey, expected_size_bytes: sizeBytes, verified_size_bytes: r2Object.sizeBytes, expected_content_type: contentType, verified_content_type: r2Object.contentType, status: "verified", metadata: { mode: "upload_complete" }, verified_at: verifiedAt });
     await supabase.from("projects").update({ status: "uploaded", updated_at: new Date().toISOString(), recording_mode: body.recording_mode, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, source_metadata: { sourceType: body.source_type, sourceLabel: body.source_label, sourceUrl: body.source_url }, import_metadata: body.import_metadata ?? {} }).eq("id", projectId).eq("owner_id", req.user!.id);
     await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: projectId, event_name: "video_uploaded", metadata: { filename: body.filename, storageKey, sizeBytes, rawFormat: sourceFormat, markers: body.markers ?? [], recordingMode: body.recording_mode, permissionConfirmed: body.permission_confirmed ?? false } });
+    await supabase.rpc("write_audit_log", { p_actor_id: req.user!.id, p_action: "upload_completed", p_target_type: "video", p_target_id: video.id, p_metadata: { projectId, storageKey, verifiedSizeBytes: r2Object.sizeBytes } });
     if (needsMp4Conversion) {
       conversionJob = await createConversionJob({ projectId, videoId: video.id, userId: req.user!.id, sourceObjectKey: storageKey, sourceFormat: "webm", targetFormat: "mp4", skipCreditCheck: true });
     }

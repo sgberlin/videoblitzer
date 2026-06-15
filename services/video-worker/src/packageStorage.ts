@@ -1,4 +1,4 @@
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { createReadStream, createWriteStream } from "node:fs";
 import { pipeline } from "node:stream/promises";
 
@@ -27,4 +27,17 @@ export async function uploadFileToR2(sourcePath: string, objectKey: string, cont
     Body: createReadStream(sourcePath),
     ContentType: contentType,
   }));
+}
+
+export async function verifyR2File(objectKey: string) {
+  try {
+    const response = await r2Client().send(new HeadObjectCommand({ Bucket: r2Bucket(), Key: objectKey }));
+    return {
+      exists: true,
+      sizeBytes: response.ContentLength ?? null,
+      contentType: response.ContentType ?? null,
+    };
+  } catch {
+    return { exists: false, sizeBytes: null, contentType: null };
+  }
 }

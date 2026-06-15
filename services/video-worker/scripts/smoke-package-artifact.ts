@@ -15,6 +15,7 @@ try {
   await mkdir(exportsDir, { recursive: true });
   await writeFile(masterPath, Buffer.from("synthetic normalized master"));
   await writeFile(exportPath, Buffer.from("synthetic export"));
+  await writeFile(path.join(workdir, "README.txt"), "Synthetic package smoke README", "utf8");
 
   const manifest: PackageManifest = {
     packageJobId: "00000000-0000-0000-0000-000000000001",
@@ -36,7 +37,12 @@ try {
       width: 1920,
       height: 1080,
       target: "YouTube",
+      assetType: "full_export",
+      platform: "youtube_standard",
+      aspectRatio: "16:9",
+      validationStatus: "valid",
     }],
+    assets: [],
     socialPackage: { packageSummary: "Smoke package" },
   };
 
@@ -45,8 +51,10 @@ try {
     manifest,
     clipPlanPath: path.join(workdir, "clip_plan.json"),
     manifestPath: path.join(workdir, "manifest.json"),
+    readmePath: path.join(workdir, "README.txt"),
     normalizedMasterPath: masterPath,
     exports: [{ ...manifest.exports[0]!, filePath: exportPath }],
+    assets: [],
   });
 
   const artifact = await stat(zipPath);

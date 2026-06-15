@@ -1,4 +1,4 @@
-const tabs = ["overview", "imports", "timeline", "match-data", "highlights", "captions", "commentary", "thumbnail", "social-pack", "exports", "debug"];
+const tabs = ["overview", "social-production", "imports", "timeline", "match-data", "highlights", "captions", "commentary", "thumbnail", "social-pack", "exports", "debug"];
 
 type ProjectLayoutProps = { children: React.ReactNode; params: Promise<{ id: string }> };
 
