@@ -13,6 +13,11 @@ function run(command, args) {
 const outputDir = path.resolve("dist/native");
 await mkdir(outputDir, { recursive: true });
 
+if (process.platform !== "darwin") {
+  console.log("Skipping ScreenCaptureKit helper build: native mac capture helper only builds on macOS.");
+  process.exit(0);
+}
+
 await run("xcrun", [
   "swiftc",
   "-O",
