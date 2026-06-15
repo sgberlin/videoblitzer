@@ -62,6 +62,7 @@ const ffmpegPath = resolveBundledTool("ffmpeg-static") || "ffmpeg";
 const ffprobePath = resolveBundledTool("ffprobe-static") || "ffprobe";
 logStartup("media tool paths resolved", { ffmpegPath, ffprobePath });
 let nativeScreenCapture: { process: ReturnType<typeof spawn>; filePath: string; stderr: string } | null = null;
+let mainWindow: BrowserWindow | null = null;
 
 function rememberPath(filePath: string) {
   allowedPaths.add(path.resolve(filePath));
@@ -93,6 +94,17 @@ async function uniqueFilePath(outputFolder: string, filename: string) {
   let index = 1;
   while (existsSync(candidate)) {
     candidate = path.join(outputFolder, `${parsed.name}_${index}${parsed.ext}`);
+    index += 1;
+  }
+  return candidate;
+}
+
+async function uniqueFolderPath(outputFolder: string, folderName: string) {
+  const base = validateFilename(folderName) || "VideoBlitzer_Capture";
+  let candidate = path.join(outputFolder, base);
+  let index = 1;
+  while (existsSync(candidate)) {
+    candidate = path.join(outputFolder, `${base}_${index}`);
     index += 1;
   }
   return candidate;
@@ -410,6 +422,7 @@ function createWindow() {
       sandbox: false,
     },
   });
+  mainWindow = window;
   logStartup("BrowserWindow created", { id: window.id });
   const showMainWindow = (reason: string) => {
     logStartup("showing BrowserWindow", { id: window.id, reason, visible: window.isVisible(), minimized: window.isMinimized() });
@@ -421,7 +434,10 @@ function createWindow() {
   };
   window.once("ready-to-show", () => showMainWindow("ready-to-show"));
   window.on("show", () => logStartup("BrowserWindow shown", { id: window.id }));
-  window.on("closed", () => logStartup("BrowserWindow closed", { id: window.id }));
+  window.on("closed", () => {
+    if (mainWindow?.id === window.id) mainWindow = null;
+    logStartup("BrowserWindow closed", { id: window.id });
+  });
   window.webContents.on("preload-error", (_event, preloadPath, error) => {
     logStartup("preload-error", { preloadPath, message: error.message, stack: error.stack });
     showStartupErrorWindow("Preload failed", error.message);
@@ -694,10 +710,31 @@ app.whenReady().then(() => {
     updateCropOverlayStateFromWindow();
     return cropOverlayState;
   });
+  ipcMain.handle("hide-recorder-window", () => {
+    mainWindow?.hide();
+    return { ok: true };
+  });
+  ipcMain.handle("show-recorder-window", () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+    }
+    return { ok: true };
+  });
   ipcMain.handle("get-settings", readSettings);
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
   ipcMain.handle("start-native-screen-capture", (_event, input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }) => startNativeScreenCapture(input));
   ipcMain.handle("stop-native-screen-capture", () => stopNativeScreenCapture());
+  ipcMain.handle("create-capture-folder", async (_event, input: { outputFolder?: string; folderName?: string }) => {
+    const outputFolder = input.outputFolder || app.getPath("videos");
+    ensureAllowedFolder(outputFolder);
+    await mkdir(outputFolder, { recursive: true });
+    const folderPath = await uniqueFolderPath(outputFolder, input.folderName || `VideoBlitzer_Capture_${new Date().toISOString().replace(/[:.]/g, "-")}`);
+    await mkdir(folderPath, { recursive: true });
+    rememberFolder(folderPath);
+    return { folderPath };
+  });
   ipcMain.handle("get-sources", async () => {
     const [screenSources, windowSources] = await Promise.all([
       desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),

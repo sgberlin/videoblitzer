@@ -18,6 +18,9 @@ contextBridge.exposeInMainWorld("videoBlitzerRecorder", {
     ipcRenderer.on("crop-overlay-state", listener);
     return () => ipcRenderer.removeListener("crop-overlay-state", listener);
   },
+  hideRecorderWindow: () => ipcRenderer.invoke("hide-recorder-window"),
+  showRecorderWindow: () => ipcRenderer.invoke("show-recorder-window"),
+  createCaptureFolder: (input: { outputFolder?: string; folderName?: string }) => ipcRenderer.invoke("create-capture-folder", input),
   startNativeScreenCapture: (input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }) => ipcRenderer.invoke("start-native-screen-capture", input),
   stopNativeScreenCapture: () => ipcRenderer.invoke("stop-native-screen-capture"),
   saveRecording: (arrayBuffer: ArrayBuffer, filename: string, outputFolder?: string) => ipcRenderer.invoke("save-recording", { arrayBuffer, filename, outputFolder } satisfies SaveRecordingInput),

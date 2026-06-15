@@ -14,6 +14,7 @@ let recorder: MediaRecorder | null = null;
 let audioRecorder: MediaRecorder | null = null;
 let nativeScreenCaptureActive = false;
 let nativeScreenCapturePath = "";
+let activeCaptureFolder: string | null = null;
 let chunks: BlobPart[] = [];
 let chunkSaveChain: Promise<void> = Promise.resolve();
 let audioChunkSaveChain: Promise<void> = Promise.resolve();
@@ -78,6 +79,8 @@ let recordingAudioInterval: number | undefined;
 let playbackAudioContext: AudioContext | null = null;
 let playbackAudioInterval: number | undefined;
 let playbackAudioSourceAttached = false;
+let silentAudioCleanup: (() => void) | null = null;
+let nativeAudioWasSilent = false;
 let lastVideoChunkAt = 0;
 let lastVideoChunkBytes = 0;
 
@@ -1106,10 +1109,19 @@ async function startRecording() {
 async function startNativeScreenRecording() {
   stopPreviewStream();
   stopMicMeter();
+  const captureStamp = timestamp();
+  const captureFolder = await window.videoBlitzerRecorder.createCaptureFolder({ outputFolder: settings.outputFolder, folderName: `VideoBlitzer_Capture_${captureStamp}` });
+  activeCaptureFolder = captureFolder.folderPath;
   audioStream = await buildRoutedAudioStream().catch((error) => {
     setText("audioStatus", error instanceof Error ? `Separate audio unavailable: ${error.message}` : "Separate audio unavailable");
     return null;
   });
+  nativeAudioWasSilent = false;
+  if (!audioStream) {
+    audioStream = createSilentAudioStream();
+    nativeAudioWasSilent = true;
+    setText("audioStatus", "Silent audio file will be written because no audio input was attached.");
+  }
   resetRecordingMeters();
   startRecordingAudioMeter(audioStream);
   chunkSaveChain = Promise.resolve();
@@ -1117,19 +1129,21 @@ async function startNativeScreenRecording() {
   chunkIndex = 0;
   audioChunkIndex = 0;
   activeManifest = createManifest();
+  activeManifest.outputFolder = activeCaptureFolder;
   activeManifest.metadata = { ...activeManifest.metadata, nativeScreenCapture: true };
   activeAudioManifest = audioStream ? createManifest() : null;
   if (activeAudioManifest) {
+    activeAudioManifest.outputFolder = activeCaptureFolder;
     activeAudioManifest.mode = `${selectedMode}_separate_audio`;
-    activeAudioManifest.sourceLabel = el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent ?? "Routed audio";
+    activeAudioManifest.sourceLabel = nativeAudioWasSilent ? "Silent audio fallback" : (el<HTMLSelectElement>("systemAudioSelect").selectedOptions[0]?.textContent ?? "Recorded audio");
   }
-  await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
-  if (activeAudioManifest) await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+  await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: activeCaptureFolder });
+  if (activeAudioManifest) await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: activeCaptureFolder });
   const frameRate = Number(el<HTMLSelectElement>("frameRate").value) || 60;
   const displaySource = nativeCaptureDisplaySource();
   const started = await window.videoBlitzerRecorder.startNativeScreenCapture({
-    outputFolder: settings.outputFolder,
-    filename: `VideoBlitzer_ScreenCapture_${timestamp()}.mp4`,
+    outputFolder: activeCaptureFolder,
+    filename: `video_${captureStamp}.mp4`,
     displayId: displaySource?.displayId,
     frameRate,
   });
@@ -1156,6 +1170,7 @@ async function startNativeScreenRecording() {
   updateMeter("videoSignalBar", "videoSignalMeter", 100, "native capture");
   updateMeter("videoBitrateBar", "videoBitrateMeter", 75, "native MP4");
   setStatus("Recording");
+  await window.videoBlitzerRecorder.hideRecorderWindow().catch(() => undefined);
 }
 
 function stopRecording() {
@@ -1186,10 +1201,14 @@ async function finishNativeScreenRecording() {
     setText("recordingHealthStatus", "Recording health: finalizing native capture.");
     el("recBadge").classList.remove("active");
     audioStream?.getTracks().forEach((track) => track.stop());
+    silentAudioCleanup?.();
+    silentAudioCleanup = null;
+    nativeAudioWasSilent = false;
     audioStream = null;
     await audioChunkSaveChain;
     if (!activeManifest) throw new Error("Recording manifest was not available for finalization.");
     const videoFile = await window.videoBlitzerRecorder.stopNativeScreenCapture();
+    await window.videoBlitzerRecorder.showRecorderWindow().catch(() => undefined);
     nativeScreenCaptureActive = false;
     nativeScreenCapturePath = "";
     let audioFile: SaveRecordingResult | null = null;
@@ -1198,38 +1217,61 @@ async function finishNativeScreenRecording() {
     if (activeAudioManifest?.chunks.length) {
       activeAudioManifest.completedAt = new Date().toISOString();
       activeAudioManifest.durationEstimateSeconds = activeManifest.durationEstimateSeconds;
-      await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
-      audioFile = await window.videoBlitzerRecorder.recoverSession(activeAudioManifest, settings.outputFolder);
+      await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: activeCaptureFolder ?? settings.outputFolder });
+      audioFile = await window.videoBlitzerRecorder.recoverSession(activeAudioManifest, activeCaptureFolder ?? settings.outputFolder);
     }
     savedFile = audioFile
-      ? await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: videoFile.filePath, audioPath: audioFile.filePath, outputFolder: settings.outputFolder, filename: `VideoBlitzer_Synced_${timestamp()}.mp4`, offsetSeconds: 0, trimToShortest: true })
+      ? await window.videoBlitzerRecorder.combineVideoAudio({ videoPath: videoFile.filePath, audioPath: audioFile.filePath, outputFolder: activeCaptureFolder ?? settings.outputFolder, filename: `synced_${timestamp()}.mp4`, offsetSeconds: 0, trimToShortest: true })
       : videoFile;
     rememberRecording(savedFile);
     activeManifest.completedAt = new Date().toISOString();
     activeManifest.finalFilePath = savedFile.filePath;
     activeManifest.metadata = { ...activeManifest.metadata, separateCapture: { videoPath: videoFile.filePath, audioPath: audioFile?.filePath, mergedPath: savedFile.filePath, audioOffsetSeconds: 0, trimToShortest: Boolean(audioFile) } };
-    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder });
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: activeCaptureFolder ?? settings.outputFolder });
     setText("savedPath", savedFile.filePath);
     setText("fileSize", `${(savedFile.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
     const mediaMeta = await window.videoBlitzerRecorder.mediaMetadata(savedFile.filePath);
     renderMediaMetadata(mediaMeta);
     updatePackageSummary();
     setStatus("Saved locally");
-    setText("uploadStatus", audioFile ? "Saved synced MP4 from native screen/audio capture. Upload when ready." : "Saved native ScreenCaptureKit MP4 locally. Upload when ready.");
+    setText("uploadStatus", audioFile ? `Saved capture folder with video, audio, and synced MP4: ${activeCaptureFolder}` : `Saved capture folder with video MP4: ${activeCaptureFolder}`);
     el<HTMLButtonElement>("openLocation").disabled = false;
     el<HTMLButtonElement>("uploadRecording").disabled = false;
     el<HTMLButtonElement>("startRecording").disabled = false;
     showScreen("upload");
   } catch (error) {
+    await window.videoBlitzerRecorder.showRecorderWindow().catch(() => undefined);
     nativeScreenCaptureActive = false;
     nativeScreenCapturePath = "";
     setStatus("Save failed");
     stopRecordingAudioMeter();
     audioStream?.getTracks().forEach((track) => track.stop());
+    silentAudioCleanup?.();
+    silentAudioCleanup = null;
+    nativeAudioWasSilent = false;
     audioStream = null;
     setText("uploadStatus", error instanceof Error ? `Could not finalize native recording: ${error.message}` : "Could not finalize native recording.");
     el<HTMLButtonElement>("startRecording").disabled = false;
+  } finally {
+    activeCaptureFolder = null;
+    nativeAudioWasSilent = false;
   }
+}
+
+function createSilentAudioStream() {
+  const context = new AudioContext();
+  const destination = context.createMediaStreamDestination();
+  const gain = context.createGain();
+  gain.gain.value = 0;
+  const oscillator = context.createOscillator();
+  oscillator.frequency.value = 440;
+  oscillator.connect(gain).connect(destination);
+  oscillator.start();
+  silentAudioCleanup = () => {
+    oscillator.stop();
+    void context.close().catch(() => undefined);
+  };
+  return destination.stream;
 }
 
 async function finishRecording() {
@@ -1676,9 +1718,9 @@ async function saveAudioChunk(blob: Blob) {
   if (!activeAudioManifest) return;
   const index = ++audioChunkIndex;
   try {
-    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeAudioManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeAudioManifest.sessionId}_audio_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: settings.outputFolder, index, durationEstimateSeconds: recordingTimesliceMs / 1000 });
+    const chunk = await window.videoBlitzerRecorder.saveRecordingChunk({ sessionId: activeAudioManifest.sessionId, arrayBuffer: await blob.arrayBuffer(), filename: `${activeAudioManifest.sessionId}_audio_chunk_${String(index).padStart(4, "0")}.webm`, outputFolder: activeAudioManifest.outputFolder ?? settings.outputFolder, index, durationEstimateSeconds: recordingTimesliceMs / 1000 });
     activeAudioManifest.chunks.push(chunk);
-    await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: settings.outputFolder });
+    await window.videoBlitzerRecorder.saveManifest({ manifest: activeAudioManifest, outputFolder: activeAudioManifest.outputFolder ?? settings.outputFolder });
   } catch (error) {
     setText("uploadStatus", error instanceof Error ? `Audio chunk write failed: ${error.message}. Stop recording and check disk permissions.` : "Audio chunk write failed. Stop recording and check disk permissions.");
     if (audioRecorder && audioRecorder.state === "recording") audioRecorder.stop();
