@@ -15,7 +15,6 @@ declare global {
       onCropOverlayState(callback: (state: CropOverlayState) => void): () => void;
       hideRecorderWindow(): Promise<{ ok: true }>;
       showRecorderWindow(): Promise<{ ok: true }>;
-      createCaptureFolder(input: { outputFolder?: string; folderName?: string }): Promise<{ folderPath: string }>;
       startNativeScreenCapture(input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }): Promise<{ ok: true; filePath: string }>;
       stopNativeScreenCapture(): Promise<SaveRecordingResult>;
       saveRecording(arrayBuffer: ArrayBuffer, filename: string, outputFolder?: string): Promise<SaveRecordingResult>;

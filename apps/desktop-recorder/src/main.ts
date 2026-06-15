@@ -99,17 +99,6 @@ async function uniqueFilePath(outputFolder: string, filename: string) {
   return candidate;
 }
 
-async function uniqueFolderPath(outputFolder: string, folderName: string) {
-  const base = validateFilename(folderName) || "VideoBlitzer_Capture";
-  let candidate = path.join(outputFolder, base);
-  let index = 1;
-  while (existsSync(candidate)) {
-    candidate = path.join(outputFolder, `${base}_${index}`);
-    index += 1;
-  }
-  return candidate;
-}
-
 async function ensureDiskSpace(outputFolder: string, requiredBytes: number) {
   const stats = await statfs(outputFolder);
   const availableBytes = Number(stats.bavail) * Number(stats.bsize);
@@ -726,15 +715,6 @@ app.whenReady().then(() => {
   ipcMain.handle("save-settings", (_event, settings: RecorderSettings) => writeSettings(settings));
   ipcMain.handle("start-native-screen-capture", (_event, input: { outputFolder?: string; filename?: string; displayId?: string; frameRate?: number }) => startNativeScreenCapture(input));
   ipcMain.handle("stop-native-screen-capture", () => stopNativeScreenCapture());
-  ipcMain.handle("create-capture-folder", async (_event, input: { outputFolder?: string; folderName?: string }) => {
-    const outputFolder = input.outputFolder || app.getPath("videos");
-    ensureAllowedFolder(outputFolder);
-    await mkdir(outputFolder, { recursive: true });
-    const folderPath = await uniqueFolderPath(outputFolder, input.folderName || `VideoBlitzer_Capture_${new Date().toISOString().replace(/[:.]/g, "-")}`);
-    await mkdir(folderPath, { recursive: true });
-    rememberFolder(folderPath);
-    return { folderPath };
-  });
   ipcMain.handle("get-sources", async () => {
     const [screenSources, windowSources] = await Promise.all([
       desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 320, height: 180 }, fetchWindowIcons: true }),

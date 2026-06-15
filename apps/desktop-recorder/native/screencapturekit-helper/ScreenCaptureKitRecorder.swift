@@ -12,7 +12,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
   private let queue = DispatchQueue(label: "com.videoblitzer.screencapturekit.frames")
   private var stream: SCStream?
   private var writer: AVAssetWriter?
-  private var input: AVAssetWriterInput?
+  private var videoInput: AVAssetWriterInput?
+  private var audioInput: AVAssetWriterInput?
   private var adaptor: AVAssetWriterInputPixelBufferAdaptor?
   private var firstPTS: CMTime?
   private var isStopping = false
@@ -37,7 +38,7 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     let height = max(2, display.height)
 
     let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
-    let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
+    let videoInput = AVAssetWriterInput(mediaType: .video, outputSettings: [
       AVVideoCodecKey: AVVideoCodecType.h264,
       AVVideoWidthKey: width,
       AVVideoHeightKey: height,
@@ -46,14 +47,27 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
         AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel
       ]
     ])
-    input.expectsMediaDataInRealTime = true
-    guard writer.canAdd(input) else {
+    videoInput.expectsMediaDataInRealTime = true
+    guard writer.canAdd(videoInput) else {
       throw NSError(domain: "VideoBlitzerScreenCapture", code: 2, userInfo: [NSLocalizedDescriptionKey: "Cannot add video input to AVAssetWriter."])
     }
-    writer.add(input)
+    writer.add(videoInput)
+
+    let audioInput = AVAssetWriterInput(mediaType: .audio, outputSettings: [
+      AVFormatIDKey: kAudioFormatMPEG4AAC,
+      AVNumberOfChannelsKey: 2,
+      AVSampleRateKey: 48_000,
+      AVEncoderBitRateKey: 192_000
+    ])
+    audioInput.expectsMediaDataInRealTime = true
+    if writer.canAdd(audioInput) {
+      writer.add(audioInput)
+      self.audioInput = audioInput
+    }
+
     self.writer = writer
-    self.input = input
-    self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [
+    self.videoInput = videoInput
+    self.adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: videoInput, sourcePixelBufferAttributes: [
       kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
       kCVPixelBufferWidthKey as String: width,
       kCVPixelBufferHeightKey as String: height
@@ -66,10 +80,15 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     configuration.queueDepth = 8
     configuration.pixelFormat = kCVPixelFormatType_32BGRA
     configuration.showsCursor = true
+    configuration.capturesAudio = true
+    configuration.excludesCurrentProcessAudio = true
 
     let filter = SCContentFilter(display: display, excludingWindows: [])
     let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
     try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
+    if self.audioInput != nil {
+      try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: queue)
+    }
     self.stream = stream
     try await stream.startCapture()
 
@@ -83,7 +102,8 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     if let stream {
       try? await stream.stopCapture()
     }
-    input?.markAsFinished()
+    videoInput?.markAsFinished()
+    audioInput?.markAsFinished()
     await withCheckedContinuation { continuation in
       writer?.finishWriting {
         continuation.resume()
@@ -99,9 +119,16 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
   }
 
   func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-    guard type == .screen, CMSampleBufferIsValid(sampleBuffer), let input, let writer else { return }
-    guard input.isReadyForMoreMediaData else { return }
+    guard CMSampleBufferIsValid(sampleBuffer), let writer else { return }
+    if type == .screen {
+      appendVideo(sampleBuffer, writer: writer)
+    } else if type == .audio {
+      appendAudio(sampleBuffer, writer: writer)
+    }
+  }
 
+  private func appendVideo(_ sampleBuffer: CMSampleBuffer, writer: AVAssetWriter) {
+    guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
     let statusAttachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]]
     if let status = statusAttachments?.first?[SCStreamFrameInfo.status] as? Int,
        status != SCFrameStatus.complete.rawValue {
@@ -119,6 +146,29 @@ final class ScreenRecorder: NSObject, SCStreamDelegate, SCStreamOutput {
     let adjustedPTS = CMTimeSubtract(pts, firstPTS)
     if adaptor?.append(imageBuffer, withPresentationTime: adjustedPTS) != true {
       fputs("VIDEO_BLITZER_SCK_WARN frame append failed: \(writer.status.rawValue) \(writer.error?.localizedDescription ?? "unknown writer status")\n", stderr)
+    }
+  }
+
+  private func appendAudio(_ sampleBuffer: CMSampleBuffer, writer: AVAssetWriter) {
+    guard let audioInput, audioInput.isReadyForMoreMediaData, let firstPTS else { return }
+    let adjustedPTS = CMTimeSubtract(CMSampleBufferGetPresentationTimeStamp(sampleBuffer), firstPTS)
+    if adjustedPTS < .zero { return }
+    var timing = CMSampleTimingInfo(
+      duration: CMSampleBufferGetDuration(sampleBuffer),
+      presentationTimeStamp: adjustedPTS,
+      decodeTimeStamp: CMSampleBufferGetDecodeTimeStamp(sampleBuffer)
+    )
+    var retimedBuffer: CMSampleBuffer?
+    let status = CMSampleBufferCreateCopyWithNewTiming(
+      allocator: kCFAllocatorDefault,
+      sampleBuffer: sampleBuffer,
+      sampleTimingEntryCount: 1,
+      sampleTimingArray: &timing,
+      sampleBufferOut: &retimedBuffer
+    )
+    guard status == noErr, let retimedBuffer else { return }
+    if !audioInput.append(retimedBuffer) {
+      fputs("VIDEO_BLITZER_SCK_WARN audio append failed: \(writer.status.rawValue) \(writer.error?.localizedDescription ?? "unknown writer status")\n", stderr)
     }
   }
 }
@@ -139,8 +189,21 @@ let displayID = argumentValue("--display-id").flatMap { CGDirectDisplayID($0) }
 let frameRate = argumentValue("--fps").flatMap { Int($0) } ?? 60
 let recorder = ScreenRecorder(outputURL: URL(fileURLWithPath: outputPath), displayID: displayID, frameRate: frameRate)
 
-signal(SIGINT) { _ in Task { await recorder.stop(); Foundation.exit(0) } }
-signal(SIGTERM) { _ in Task { await recorder.stop(); Foundation.exit(0) } }
+signal(SIGINT, SIG_IGN)
+signal(SIGTERM, SIG_IGN)
+
+let signalQueue = DispatchQueue(label: "com.videoblitzer.screencapturekit.signals")
+let interruptSource = DispatchSource.makeSignalSource(signal: SIGINT, queue: signalQueue)
+interruptSource.setEventHandler {
+  Task { await recorder.stop(); Foundation.exit(0) }
+}
+interruptSource.resume()
+
+let terminateSource = DispatchSource.makeSignalSource(signal: SIGTERM, queue: signalQueue)
+terminateSource.setEventHandler {
+  Task { await recorder.stop(); Foundation.exit(0) }
+}
+terminateSource.resume()
 
 Task {
   do {
