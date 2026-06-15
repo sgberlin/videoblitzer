@@ -3,6 +3,7 @@ import { clipCommand, extractFrameCommand, probeCommand, shortsExportCommand } f
 import { createClient } from "@supabase/supabase-js";
 import { convertWebmToMp4FromR2 } from "./r2Conversion";
 import { processOneImportJob } from "./directImport";
+import { processOnePackageJob } from "./packageJob";
 export { convertWebmToMp4FromR2 } from "./r2Conversion";
 
 export async function analyzeVideo(projectId: string, inputPath: string) {
@@ -121,6 +122,8 @@ export async function startWorkerDaemon() {
       if (importResult.processed) console.log("[video-worker] imported", importResult);
       const result = await processOneExportJob();
       if (result.processed) console.log("[video-worker] processed", result);
+      const packageResult = await processOnePackageJob();
+      if (packageResult.processed) console.log("[video-worker] packaged", packageResult);
     } catch (error) {
       console.error("[video-worker] poll failed", error instanceof Error ? error.message : error);
     }

@@ -8,6 +8,7 @@
     "daemon": "tsx src/index.ts --daemon",
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
+    "smoke:package-artifact": "tsx scripts/smoke-package-artifact.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -16,10 +17,12 @@
     "@videoblitzer/export-presets": "file:../../packages/export-presets",
     "@videoblitzer/highlight-engine": "file:../../packages/highlight-engine",
     "@videoblitzer/shared-types": "file:../../packages/shared-types",
+    "archiver": "^8.0.0",
     "dotenv": "latest",
     "zod": "latest"
   },
   "devDependencies": {
+    "@types/archiver": "^8.0.0",
     "@types/node": "^20.19.0",
     "tsx": "latest",
     "typescript": "latest"

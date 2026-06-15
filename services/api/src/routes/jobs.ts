@@ -59,5 +59,24 @@ jobsRouter.post("/:id/retry", async (req, res) => {
   const { data, error } = await supabase.from("jobs").update({ status: "queued", progress: 0, error: null, attempts: nextAttempts, updated_at: new Date().toISOString() }).eq("id", req.params.id).eq("user_id", req.user!.id).select("*").maybeSingle();
   if (error) return res.status(500).json({ error: error.message });
   if (data?.type === "convert_mp4") await supabase.from("export_jobs").update({ status: "queued", error_message: null, attempts: nextAttempts, locked_at: null, worker_id: null, updated_at: new Date().toISOString() }).eq("id", req.params.id).eq("user_id", req.user!.id).eq("status", "failed");
+  if (data?.type === "social_content_pack") {
+    await supabase
+      .from("package_jobs")
+      .update({
+        status: "queued",
+        progress: 0,
+        error_message: null,
+        attempts: nextAttempts,
+        locked_at: null,
+        worker_id: null,
+        artifact_object_key: null,
+        output: {},
+        manifest_json: {},
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", req.params.id)
+      .eq("user_id", req.user!.id)
+      .eq("status", "failed");
+  }
   return res.json({ job: data });
 });

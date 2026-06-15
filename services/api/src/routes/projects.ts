@@ -29,14 +29,15 @@ projectsRouter.get("/", async (req, res) => {
 
 projectsRouter.get("/:id", async (req, res) => {
   const supabase = createServiceClient();
-  if (!supabase) return res.json({ project: null, videos: [], jobs: [], exports: [], exportJobs: [], importJobs: [], matchData: null, thumbnails: [], socialPackages: [] });
+  if (!supabase) return res.json({ project: null, videos: [], jobs: [], exports: [], exportJobs: [], packageJobs: [], importJobs: [], matchData: null, thumbnails: [], socialPackages: [] });
   const projectId = req.params.id;
-  const [project, videos, jobs, exports, exportJobs, importJobs, matchData, thumbnails, socialPackages, events, importAudits, clipJobs, transcripts] = await Promise.all([
+  const [project, videos, jobs, exports, exportJobs, packageJobs, importJobs, matchData, thumbnails, socialPackages, events, importAudits, clipJobs, transcripts] = await Promise.all([
     supabase.from("projects").select("*").eq("id", projectId).eq("owner_id", req.user!.id).maybeSingle(),
     supabase.from("videos").select("*").eq("project_id", projectId).eq("owner_id", req.user!.id).order("created_at", { ascending: false }),
     supabase.from("jobs").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
     supabase.from("exports").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
     supabase.from("export_jobs").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
+    supabase.from("package_jobs").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
     supabase.from("import_jobs").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
     supabase.from("match_data").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).maybeSingle(),
     supabase.from("thumbnails").select("*").eq("project_id", projectId).eq("user_id", req.user!.id).order("created_at", { ascending: false }),
@@ -48,9 +49,9 @@ projectsRouter.get("/:id", async (req, res) => {
   ]);
   if (project.error) return res.status(500).json({ error: project.error.message });
   if (!project.data) return res.status(404).json({ error: "Project not found" });
-  const error = videos.error ?? jobs.error ?? exports.error ?? exportJobs.error ?? importJobs.error ?? matchData.error ?? thumbnails.error ?? socialPackages.error ?? events.error ?? importAudits.error ?? clipJobs.error ?? transcripts.error;
+  const error = videos.error ?? jobs.error ?? exports.error ?? exportJobs.error ?? packageJobs.error ?? importJobs.error ?? matchData.error ?? thumbnails.error ?? socialPackages.error ?? events.error ?? importAudits.error ?? clipJobs.error ?? transcripts.error;
   if (error) return res.status(500).json({ error: error.message });
-  return res.json({ project: project.data, videos: videos.data ?? [], jobs: jobs.data ?? [], exports: exports.data ?? [], exportJobs: exportJobs.data ?? [], importJobs: importJobs.data ?? [], matchData: matchData.data, thumbnails: thumbnails.data ?? [], socialPackages: socialPackages.data ?? [], events: events.data ?? [], importAudits: importAudits.data ?? [], clipJobs: clipJobs.data ?? [], transcripts: transcripts.data ?? [] });
+  return res.json({ project: project.data, videos: videos.data ?? [], jobs: jobs.data ?? [], exports: exports.data ?? [], exportJobs: exportJobs.data ?? [], packageJobs: packageJobs.data ?? [], importJobs: importJobs.data ?? [], matchData: matchData.data, thumbnails: thumbnails.data ?? [], socialPackages: socialPackages.data ?? [], events: events.data ?? [], importAudits: importAudits.data ?? [], clipJobs: clipJobs.data ?? [], transcripts: transcripts.data ?? [] });
 });
 
 projectsRouter.patch("/:id", async (req, res) => {
