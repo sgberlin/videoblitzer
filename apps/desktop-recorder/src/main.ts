@@ -391,6 +391,17 @@ function setCropOverlayLocked(locked: boolean) {
   cropOverlayWindow.webContents.send("crop-overlay-state", cropOverlayState);
 }
 
+function restoreMainWindow(reason: string) {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  logStartup("restoring BrowserWindow", { id: mainWindow.id, reason, visible: mainWindow.isVisible(), minimized: mainWindow.isMinimized() });
+  if (process.platform === "darwin") app.dock?.show();
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+  mainWindow.moveTop();
+  return true;
+}
+
 function createWindow() {
   const runNavigationSmoke = process.env.VB_RECORDER_SMOKE_NAVIGATION === "1";
   const smokeScreenshotPath = process.env.VB_RECORDER_SCREENSHOT_PATH;
@@ -413,14 +424,7 @@ function createWindow() {
   });
   mainWindow = window;
   logStartup("BrowserWindow created", { id: window.id });
-  const showMainWindow = (reason: string) => {
-    logStartup("showing BrowserWindow", { id: window.id, reason, visible: window.isVisible(), minimized: window.isMinimized() });
-    if (process.platform === "darwin") app.dock?.show();
-    if (window.isMinimized()) window.restore();
-    window.show();
-    window.focus();
-    window.moveTop();
-  };
+  const showMainWindow = (reason: string) => { restoreMainWindow(reason); };
   window.once("ready-to-show", () => showMainWindow("ready-to-show"));
   window.on("show", () => logStartup("BrowserWindow shown", { id: window.id }));
   window.on("closed", () => {
@@ -704,11 +708,7 @@ app.whenReady().then(() => {
     return { ok: true };
   });
   ipcMain.handle("show-recorder-window", () => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.show();
-      mainWindow.focus();
-    }
+    restoreMainWindow("ipc show-recorder-window");
     return { ok: true };
   });
   ipcMain.handle("get-settings", readSettings);
@@ -857,4 +857,4 @@ app.whenReady().then(() => {
 });
 
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
-app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+app.on("activate", () => { if (!restoreMainWindow("app activate")) createWindow(); });
