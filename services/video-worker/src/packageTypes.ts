@@ -18,6 +18,13 @@ export type VideoRow = {
   storage_key: string | null;
   source_object_key: string | null;
   source_format: string | null;
+  has_video?: boolean | null;
+  has_audio?: boolean | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  duration_seconds?: number | null;
+  width?: number | null;
+  height?: number | null;
   markers: Array<{ seconds?: number; label?: string; note?: string; createdAt?: string }>;
 };
 

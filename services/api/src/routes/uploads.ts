@@ -8,6 +8,7 @@ import { createServiceClient } from "../supabase";
 import { isExpectedRawUploadKey, userOwnsProject } from "../lib/ownership";
 import { enforceCredits, refundCredits } from "../lib/creditLedger";
 import type { CreditAction } from "../lib/credits";
+import { probeR2MediaObject } from "../lib/mediaProbe";
 
 const allowedTypes = ["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"] as const;
 const sourceFormats = ["mp4", "mov", "mkv", "webm"] as const;
@@ -70,6 +71,7 @@ uploadsRouter.post("/verify", async (req, res) => {
 
   try {
     const r2Object = await verifyUploadedObjectForUser({ userId: req.user!.id, projectId, videoId, storageKey, contentType, sizeBytes });
+    const media = await probeR2MediaObject(storageKey);
     const verifiedAt = new Date().toISOString();
     const verification = {
       id: crypto.randomUUID(),
@@ -82,7 +84,7 @@ uploadsRouter.post("/verify", async (req, res) => {
       expected_content_type: contentType,
       verified_content_type: r2Object.contentType,
       status: "verified",
-      metadata: { mode: r2Object.exists ? "head_object" : "missing" },
+      metadata: { mode: r2Object.exists ? "head_object_and_ffprobe" : "missing", media },
       verified_at: verifiedAt,
     };
     const { error: verificationError } = await supabase.from("upload_verifications").insert(verification);
@@ -95,7 +97,14 @@ uploadsRouter.post("/verify", async (req, res) => {
           verified_at: verifiedAt,
           verified_size_bytes: r2Object.sizeBytes,
           verified_content_type: r2Object.contentType,
-          verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes },
+          has_video: media.has_video,
+          has_audio: media.has_audio,
+          video_codec: media.video_codec,
+          audio_codec: media.audio_codec,
+          duration_seconds: media.duration_seconds,
+          width: media.width,
+          height: media.height,
+          verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes, media },
         })
         .eq("id", videoId)
         .eq("owner_id", req.user!.id);
@@ -105,7 +114,7 @@ uploadsRouter.post("/verify", async (req, res) => {
       p_action: "upload_verified",
       p_target_type: videoId ? "video" : "upload_object",
       p_target_id: videoId ?? storageKey,
-      p_metadata: { projectId, storageKey, expectedSizeBytes: sizeBytes, verifiedSizeBytes: r2Object.sizeBytes },
+      p_metadata: { projectId, storageKey, expectedSizeBytes: sizeBytes, verifiedSizeBytes: r2Object.sizeBytes, media },
     });
     return res.json({
       ok: true,
@@ -113,6 +122,7 @@ uploadsRouter.post("/verify", async (req, res) => {
       message: "Upload verified. Ready to produce package.",
       verification,
       r2Object,
+      media,
     });
   } catch (error) {
     const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number" ? (error as { statusCode: number }).statusCode : 500;
@@ -181,8 +191,10 @@ uploadsRouter.post("/complete", async (req, res) => {
   const supabase = createServiceClient();
   if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
   let r2Object: Awaited<ReturnType<typeof verifyR2Object>>;
+  let media: Awaited<ReturnType<typeof probeR2MediaObject>>;
   try {
     r2Object = await verifyUploadedObjectForUser({ userId: req.user!.id, projectId, storageKey, contentType, sizeBytes });
+    media = await probeR2MediaObject(storageKey);
   } catch (error) {
     const statusCode = typeof (error as { statusCode?: unknown }).statusCode === "number" ? (error as { statusCode: number }).statusCode : 500;
     const code = typeof (error as { code?: unknown }).code === "string" ? (error as { code: string }).code : "upload_verification_failed";
@@ -204,15 +216,15 @@ uploadsRouter.post("/complete", async (req, res) => {
     charged.push({ action: "video_conversion_mp4", cost: conversionCredit.cost });
   }
   const verifiedAt = new Date().toISOString();
-  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: sourceFormat, desired_export_format: desiredExportFormat, size_bytes: sizeBytes, status: "uploaded", verification_status: "verified", verified_at: verifiedAt, verified_size_bytes: r2Object.sizeBytes, verified_content_type: r2Object.contentType, verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes }, recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, duration_seconds: body.duration_seconds, conversion_status: needsMp4Conversion ? "queued" : "not_requested" };
+  const video = { id: crypto.randomUUID(), project_id: projectId, owner_id: req.user!.id, user_id: req.user!.id, filename: body.filename, original_filename: body.filename, mime_type: contentType, content_type: contentType, storage_key: storageKey, source_object_key: storageKey, source_format: sourceFormat, desired_export_format: desiredExportFormat, size_bytes: sizeBytes, status: "uploaded", verification_status: "verified", verified_at: verifiedAt, verified_size_bytes: r2Object.sizeBytes, verified_content_type: r2Object.contentType, has_video: media.has_video, has_audio: media.has_audio, video_codec: media.video_codec, audio_codec: media.audio_codec, duration_seconds: body.duration_seconds ?? media.duration_seconds, width: media.width, height: media.height, verification_metadata: { objectKey: storageKey, expectedSizeBytes: sizeBytes, media }, recording_mode: body.recording_mode, source_type: body.source_type, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, markers: body.markers ?? [], chunk_manifest: body.chunk_manifest ?? {}, import_metadata: body.import_metadata ?? {}, local_original_filename: body.local_original_filename, original_mime_type: body.original_mime_type ?? contentType, conversion_status: needsMp4Conversion ? "queued" : "not_requested" };
   let conversionJob = null;
   try {
     const { error } = await supabase.from("videos").insert(video);
     if (error) throw new Error(error.message);
-    await supabase.from("upload_verifications").insert({ id: crypto.randomUUID(), user_id: req.user!.id, project_id: projectId, video_id: video.id, object_key: storageKey, expected_size_bytes: sizeBytes, verified_size_bytes: r2Object.sizeBytes, expected_content_type: contentType, verified_content_type: r2Object.contentType, status: "verified", metadata: { mode: "upload_complete" }, verified_at: verifiedAt });
+    await supabase.from("upload_verifications").insert({ id: crypto.randomUUID(), user_id: req.user!.id, project_id: projectId, video_id: video.id, object_key: storageKey, expected_size_bytes: sizeBytes, verified_size_bytes: r2Object.sizeBytes, expected_content_type: contentType, verified_content_type: r2Object.contentType, status: "verified", metadata: { mode: "upload_complete", media }, verified_at: verifiedAt });
     await supabase.from("projects").update({ status: "uploaded", updated_at: new Date().toISOString(), recording_mode: body.recording_mode, source_label: body.source_label, source_url: body.source_url, permission_confirmed: body.permission_confirmed ?? false, permission_confirmed_at: permissionConfirmedAt, recording_metadata: body.recording_metadata ?? {}, match_metadata: body.match_metadata ?? {}, source_metadata: { sourceType: body.source_type, sourceLabel: body.source_label, sourceUrl: body.source_url }, import_metadata: body.import_metadata ?? {} }).eq("id", projectId).eq("owner_id", req.user!.id);
     await supabase.from("usage_events").insert({ user_id: req.user!.id, project_id: projectId, event_name: "video_uploaded", metadata: { filename: body.filename, storageKey, sizeBytes, rawFormat: sourceFormat, markers: body.markers ?? [], recordingMode: body.recording_mode, permissionConfirmed: body.permission_confirmed ?? false } });
-    await supabase.rpc("write_audit_log", { p_actor_id: req.user!.id, p_action: "upload_completed", p_target_type: "video", p_target_id: video.id, p_metadata: { projectId, storageKey, verifiedSizeBytes: r2Object.sizeBytes } });
+    await supabase.rpc("write_audit_log", { p_actor_id: req.user!.id, p_action: "upload_completed", p_target_type: "video", p_target_id: video.id, p_metadata: { projectId, storageKey, verifiedSizeBytes: r2Object.sizeBytes, media } });
     if (needsMp4Conversion) {
       conversionJob = await createConversionJob({ projectId, videoId: video.id, userId: req.user!.id, sourceObjectKey: storageKey, sourceFormat: "webm", targetFormat: "mp4", skipCreditCheck: true });
     }

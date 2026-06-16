@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "npm run typecheck && esbuild src/server.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:@aws-sdk/* --external:@supabase/supabase-js --external:cors --external:dotenv --external:express --external:express-rate-limit --external:helmet --external:rate-limit-redis --external:redis --external:stripe --external:zod",
+    "build": "npm run typecheck && esbuild src/server.ts --bundle --platform=node --format=esm --outfile=dist/server.js --external:@aws-sdk/* --external:@supabase/supabase-js --external:cors --external:dotenv --external:express --external:express-rate-limit --external:ffprobe-static --external:helmet --external:rate-limit-redis --external:redis --external:stripe --external:zod",
     "lint": "tsc --noEmit",
+    "smoke:media-validation": "tsx scripts/smoke-media-validation.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -21,6 +22,7 @@
     "dotenv": "latest",
     "express": "latest",
     "express-rate-limit": "latest",
+    "ffprobe-static": "^3.1.0",
     "helmet": "latest",
     "rate-limit-redis": "^5.0.0",
     "redis": "^5.12.1",

@@ -213,7 +213,7 @@ async function claimQueuedPackageJob(client: WorkerClient) {
 async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
   const { data, error } = await client
     .from("videos")
-    .select("id,project_id,storage_key,source_object_key,source_format,markers")
+    .select("id,project_id,storage_key,source_object_key,source_format,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,markers")
     .eq("id", job.video_id)
     .eq("owner_id", job.user_id)
     .maybeSingle();
@@ -445,6 +445,9 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
   try {
     await cleanupPreviousPackageRows(client, job);
     const video = await fetchPackageVideo(client, job);
+    if (video.has_video !== true) {
+      throw new Error("audio_only_source_not_supported");
+    }
     const sourceObjectKey = String((job.input?.sourceObjectKey as string | undefined) ?? video.storage_key ?? video.source_object_key ?? "");
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
 

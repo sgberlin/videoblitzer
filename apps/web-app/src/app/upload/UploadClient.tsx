@@ -7,10 +7,11 @@ import type { DashboardProject } from "../../lib/types";
 
 type CreatedProject = { project: { id: string; title: string; status: string } };
 type SignedUpload = { key: string; uploadUrl: string | null; expiresIn: number; expiresAt?: string; method?: "PUT"; mode: string };
-type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string } };
-type CreatedJob = { job: { id: string; status: string; type: string } };
+type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null } };
+type PackageJobResponse = { job_id: string; status: string };
 type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
+type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 
 function contentTypeFor(file: File) {
   if (file.type) return file.type;
@@ -74,7 +75,10 @@ export function UploadClient() {
   const [progress, setProgress] = useState<UploadProgress>({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
   const [status, setStatus] = useState("Choose a video file to start.");
   const [projectUrl, setProjectUrl] = useState("");
+  const [uploadedVideo, setUploadedVideo] = useState<UploadedVideoState | null>(null);
+  const [packageStatus, setPackageStatus] = useState("");
   const [busy, setBusy] = useState(false);
+  const [packageBusy, setPackageBusy] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const auth = useAuthSession();
 
@@ -119,6 +123,8 @@ export function UploadClient() {
     setBusy(true);
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: file.size, speedBytesPerSecond: 0, etaSeconds: null, state: "preparing" });
     setProjectUrl("");
+    setUploadedVideo(null);
+    setPackageStatus("");
 
     try {
       if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
@@ -149,20 +155,33 @@ export function UploadClient() {
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
       }, auth.session.access_token);
 
-      setStatus("Creating initial analyze job...");
-      const job = await apiFetch<CreatedJob>("/jobs/analyze", {
-        method: "POST",
-        body: JSON.stringify({ projectId: created.project.id, videoId: completed.video.id }),
-      }, auth.session.access_token);
-
       setProgress((current) => ({ ...current, state: "complete" }));
-      setStatus(`Upload verified. Ready to produce package. Analyze job ${job.job.id} is ${job.job.status}.`);
+      setUploadedVideo(completed.video);
+      setStatus(completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
       setProjectUrl(`/projects/${created.project.id}/social-production`);
     } catch (error) {
       setProgress((current) => ({ ...current, state: "failed" }));
       setStatus(error instanceof Error ? error.message : "Upload failed. Please try again.");
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function producePackage() {
+    if (!auth.session?.access_token || !uploadedVideo) return;
+    setPackageBusy(true);
+    setPackageStatus("");
+    try {
+      const response = await apiFetch<PackageJobResponse>("/packages/generate", {
+        method: "POST",
+        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id }),
+      }, auth.session.access_token);
+      setPackageStatus(`Package queued: ${response.job_id}. Opening Social Media Production...`);
+      window.location.href = `/projects/${uploadedVideo.project_id}/social-production`;
+    } catch (error) {
+      setPackageStatus(error instanceof Error ? error.message : "Could not produce package.");
+    } finally {
+      setPackageBusy(false);
     }
   }
 
@@ -194,7 +213,17 @@ export function UploadClient() {
           <p className="muted">{formatBytes(progress.loadedBytes)} / {formatBytes(progress.totalBytes || file?.size || 0)} · {formatBytes(progress.speedBytesPerSecond)}/s · ETA {formatEta(progress.etaSeconds)}</p>
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
-        {projectUrl && <p><a className="button secondary" href={projectUrl}>Open Social Media Production</a></p>}
+        {uploadedVideo && <div className="card">
+          <h3>Produce Package</h3>
+          {uploadedVideo.has_video === true
+            ? <p className="status">Upload verified. Ready to produce package.</p>
+            : <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
+          <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
+          <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
+          <button className="button" onClick={() => void producePackage()} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Package"}</button>
+          {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
+          {packageStatus && <p className={packageStatus.toLowerCase().includes("audio only") || packageStatus.toLowerCase().includes("could not") ? "warning" : "muted"}>{packageStatus}</p>}
+        </div>}
       </div>
       <div className="card"><h3>Record New Match</h3><p className="muted">Coming desktop app. Use replay buffers, hotkeys, and separate tracks, then upload to the dashboard.</p><button className="button secondary">Coming Desktop App</button></div>
     </div>

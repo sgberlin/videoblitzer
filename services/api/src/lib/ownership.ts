@@ -27,7 +27,7 @@ export async function userOwnsVideo(userId: string, videoId: string) {
 export async function getOwnedVideo(userId: string, videoId: string) {
   const supabase = createServiceClient();
   if (!supabase) throw new Error("Supabase service role is required for ownership checks.");
-  const { data, error } = await supabase.from("videos").select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes").eq("id", videoId).eq("owner_id", userId).maybeSingle();
+  const { data, error } = await supabase.from("videos").select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height").eq("id", videoId).eq("owner_id", userId).maybeSingle();
   if (error) throw error;
   return data;
 }

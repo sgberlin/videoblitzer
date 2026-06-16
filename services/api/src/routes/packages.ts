@@ -22,7 +22,7 @@ async function latestOwnedVideoForProject(userId: string, projectId: string) {
   if (!supabase) throw new Error("Supabase service role is required.");
   const { data, error } = await supabase
     .from("videos")
-    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes")
+    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height")
     .eq("project_id", projectId)
     .eq("owner_id", userId)
     .order("created_at", { ascending: false })
@@ -46,6 +46,14 @@ packagesRouter.post("/generate", async (req, res) => {
       error: "Upload must be verified before producing a package.",
       code: "upload_not_verified",
       verificationStatus: video.verification_status ?? "unverified",
+    });
+  }
+  if (video.has_video !== true) {
+    return res.status(409).json({
+      error: "This file contains audio only. Social media video packages require a video stream.",
+      code: "audio_only_source_not_supported",
+      hasVideo: Boolean(video.has_video),
+      hasAudio: Boolean(video.has_audio),
     });
   }
 
@@ -83,6 +91,13 @@ packagesRouter.post("/generate", async (req, res) => {
     sourceMimeType: mimeType,
       verifiedAt: video.verified_at,
       verifiedSizeBytes: video.verified_size_bytes,
+      hasVideo: video.has_video,
+      hasAudio: video.has_audio,
+      videoCodec: video.video_codec,
+      audioCodec: video.audio_codec,
+      durationSeconds: video.duration_seconds,
+      width: video.width,
+      height: video.height,
     presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
     includeClipPlan: body.includeClipPlan,
   };

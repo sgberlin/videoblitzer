@@ -63,6 +63,8 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
   const verifications = (data.uploadVerifications ?? []) as UploadVerification[];
   const latestVerification = latestVideo ? verifications.find((verification) => verification.video_id === latestVideo.id) ?? verifications[0] : verifications[0];
   const uploadVerified = latestVideo?.verification_status === "verified" || latestVerification?.status === "verified";
+  const hasVideoStream = latestVideo?.has_video === true;
+  const isAudioOnly = uploadVerified && latestVideo?.has_audio === true && !hasVideoStream;
   const activePackage = latestPackage && ["queued", "processing"].includes(String(latestPackage.status));
   const packageComplete = latestPackage?.status === "completed";
   const packageFailed = latestPackage?.status === "failed";
@@ -122,7 +124,12 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
         {latestVideo ? <>
           <p><strong>{String(latestVideo.filename ?? latestVideo.original_filename ?? "Uploaded video")}</strong></p>
           <p className={uploadVerified ? "status" : "warning"}>{uploadVerified ? "Upload verified. Ready to produce package." : "Upload is not verified yet."}</p>
+          {isAudioOnly && <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
+          {uploadVerified && !isAudioOnly && <p className={hasVideoStream ? "status" : "warning"}>{hasVideoStream ? "Video stream detected." : "Video stream metadata is missing. Re-verify this upload before producing a package."}</p>}
+          <p className="muted">Streams: video {hasVideoStream ? "yes" : "no"} · audio {latestVideo.has_audio === true ? "yes" : "no"} {latestVideo.video_codec ? `· video codec ${String(latestVideo.video_codec)}` : ""} {latestVideo.audio_codec ? `· audio codec ${String(latestVideo.audio_codec)}` : ""}</p>
           <p className="muted">Size: {typeof latestVideo.verified_size_bytes === "number" ? `${(latestVideo.verified_size_bytes / 1024 / 1024).toFixed(1)} MB verified` : typeof latestVideo.size_bytes === "number" ? `${(latestVideo.size_bytes / 1024 / 1024).toFixed(1)} MB expected` : "Unknown size"}</p>
+          {typeof latestVideo.duration_seconds === "number" && <p className="muted">Duration: {latestVideo.duration_seconds.toFixed(1)}s</p>}
+          {typeof latestVideo.width === "number" && typeof latestVideo.height === "number" && <p className="muted">Resolution: {latestVideo.width}x{latestVideo.height}</p>}
           {latestVerification?.verified_at && <p className="muted">Verified at {new Date(latestVerification.verified_at).toLocaleString()}</p>}
         </> : <EmptyState label="uploaded video" />}
       </div>
@@ -130,8 +137,10 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
       <div className="card">
         <h3>Produce Package</h3>
         <p className="muted">Creates vertical clips, landscape exports, thumbnails, captions/metadata, manifest, README, and ZIP. Package generation is async and safe for long videos.</p>
-        <button className="button" disabled={busy || !latestVideo || !uploadVerified || Boolean(activePackage)} onClick={() => void producePackage()}>{busy ? "Working..." : "Produce Package"}</button>
+        <button className="button" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage()}>{busy ? "Working..." : "Produce Package"}</button>
         {!uploadVerified && <p className="warning">Button stays disabled until upload verification succeeds.</p>}
+        {isAudioOnly && <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
+        {uploadVerified && !isAudioOnly && !hasVideoStream && <p className="warning">Video stream metadata is missing. Re-upload or re-verify before producing a package.</p>}
         {packageFailed && <button className="button secondary" disabled={busy} onClick={() => void retryPackage()}>Retry Package</button>}
         {packageComplete && <button className="button secondary" onClick={() => void downloadPackage()}>Download Package ZIP</button>}
         {message && <p className="muted">{message}</p>}
