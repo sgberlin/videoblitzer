@@ -5,6 +5,25 @@ const qualityBitrates = { standard: 5_000_000, high: 10_000_000, match: 15_000_0
 const recordingTimesliceMs = 5_000;
 type CaptureAspect = "source" | "16:9" | "4:3" | "9:16";
 interface CropRect { x: number; y: number; width: number; height: number; }
+interface UploadedVideoState {
+  id: string;
+  project_id: string;
+  has_video?: boolean | null;
+  has_audio?: boolean | null;
+  duration_seconds?: number | null;
+  width?: number | null;
+  height?: number | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+}
+interface PackageJobState {
+  id?: string;
+  status?: string;
+  stage?: string;
+  progress?: number;
+  artifact_object_key?: string | null;
+  error_message?: string | null;
+}
 
 let sources: RecorderSource[] = [];
 let selectedSource: RecorderSource | null = null;
@@ -80,6 +99,9 @@ let playbackAudioInterval: number | undefined;
 let playbackAudioSourceAttached = false;
 let lastVideoChunkAt = 0;
 let lastVideoChunkBytes = 0;
+let uploadedVideoState: UploadedVideoState | null = null;
+let packageJobState: PackageJobState | null = null;
+let packagePollInterval: number | undefined;
 
 function bridge() {
   return window.videoBlitzerRecorder;
@@ -288,6 +310,44 @@ function updateUploadProgress(value: number) {
   setText("uploadPercent", `${value}%`);
 }
 
+function socialProductionUrl(projectId: string) {
+  return `https://app.videoblitzer.com/projects/${projectId}/social-production`;
+}
+
+function formatDurationSeconds(value?: number | null) {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}s` : "unknown";
+}
+
+function formatResolution(width?: number | null, height?: number | null) {
+  return typeof width === "number" && typeof height === "number" ? `${width}x${height}` : "unknown";
+}
+
+function renderPackageState(message?: string, warning = false) {
+  const ready = el("packageReadyStatus");
+  const hasVideo = uploadedVideoState?.has_video === true;
+  const isAudioOnly = uploadedVideoState?.has_audio === true && !hasVideo;
+  ready.classList.toggle("status", Boolean(uploadedVideoState && hasVideo));
+  ready.classList.toggle("warning", Boolean(uploadedVideoState && !hasVideo));
+  if (!uploadedVideoState) {
+    ready.textContent = "Upload a verified video to enable package production.";
+  } else if (isAudioOnly) {
+    ready.textContent = "This file contains audio only. Social media video packages require a video stream.";
+  } else if (hasVideo) {
+    ready.textContent = "Upload verified. Ready to produce package.";
+  } else {
+    ready.textContent = "Video stream metadata is missing. Re-upload or re-verify before producing a package.";
+  }
+  setText("packageMediaSummary", `Has video: ${hasVideo ? "yes" : "no"} · Has audio: ${uploadedVideoState?.has_audio === true ? "yes" : "no"} · Duration: ${formatDurationSeconds(uploadedVideoState?.duration_seconds)} · Resolution: ${formatResolution(uploadedVideoState?.width, uploadedVideoState?.height)} · Codec: ${uploadedVideoState?.video_codec ?? "no video"} / ${uploadedVideoState?.audio_codec ?? "no audio"}`);
+  el<HTMLButtonElement>("producePackage").disabled = !uploadedVideoState || !hasVideo || ["queued", "processing"].includes(String(packageJobState?.status));
+  el<HTMLButtonElement>("openSocialProduction").disabled = !uploadedVideoState;
+  el<HTMLButtonElement>("downloadPackageZip").disabled = packageJobState?.status !== "completed" || !packageJobState.artifact_object_key;
+  const statusText = message ?? (packageJobState ? `Package ${packageJobState.status ?? "not started"} · ${String(packageJobState.stage ?? "queued").replaceAll("_", " ")} · ${Number(packageJobState.progress ?? 0)}%` : "Package has not been started.");
+  setText("packageStatus", statusText);
+  el("packageStatus").classList.toggle("warning", warning || packageJobState?.status === "failed");
+  el("packageStatus").classList.toggle("status", packageJobState?.status === "completed");
+  setText("downloadPackageStatus", packageJobState?.status === "completed" ? "Package ZIP is ready to download." : statusText);
+}
+
 function renderCropOverlayStatus(state?: CropOverlayState) {
   if (!state?.visible) {
     setText("cropOverlayStatus", "Floating frame is off. Use it to crop a browser/video while the recorder is aside.");
@@ -403,6 +463,7 @@ function updatePackageSummary() {
   const projectHtml = el("projectLink").innerHTML.trim();
   el("finalPackageProjectLink").innerHTML = projectHtml || "Not uploaded.";
   el<HTMLButtonElement>("openProjectFromPackage").disabled = !projectHtml;
+  renderPackageState();
 }
 
 function renderMediaMetadata(meta: { durationSeconds: number | null; format?: string; streams: Array<{ type?: string; codec?: string; durationSeconds?: number | null; channels?: number | null; sampleRate?: string; width?: number; height?: number }>; error?: string }) {
@@ -430,6 +491,10 @@ function rememberRecording(recording: SaveRecordingResult) {
 function selectRecording(recording: SaveRecordingResult) {
   savedFile = recording;
   lastBlob = null;
+  uploadedVideoState = null;
+  packageJobState = null;
+  if (packagePollInterval) window.clearInterval(packagePollInterval);
+  packagePollInterval = undefined;
   setText("savedPath", recording.filePath);
   setText("fileSize", `${(recording.sizeBytes / 1024 / 1024).toFixed(1)} MB`);
   el<HTMLButtonElement>("openLocation").disabled = false;
@@ -1323,22 +1388,69 @@ async function uploadRecording() {
     setText("objectKey", objectKey);
     updatePackageSummary();
 
-    setText("uploadStatus", "Saving video record and queuing backend work...");
-    const completed = await api<{ video: { id: string }; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: contentType, size_bytes: savedFile.sizeBytes, raw_format: rawFormat, desired_export_format: rawFormat === "webm" ? "mp4" : undefined, recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: contentType, duration_seconds: activeManifest?.durationEstimateSeconds }) });
+    setText("uploadStatus", "Saving video record and verifying media streams...");
+    const completed = await api<{ video: UploadedVideoState; conversion_job?: { id: string; status: string } }>("/uploads/complete", { method: "POST", body: JSON.stringify({ project_id: created.project.id, object_key: objectKey, filename, content_type: contentType, size_bytes: savedFile.sizeBytes, raw_format: rawFormat, desired_export_format: rawFormat === "webm" ? "mp4" : undefined, recording_mode: selectedMode, source_type: "desktop_recorder", source_label: selectedSource?.name, source_url: metadata.matchMetadata.sourceUrl, permission_confirmed: metadata.permission.permissionConfirmed, permission_confirmed_at: metadata.permission.confirmedAt, recording_metadata: metadata.recordingMetadata, match_metadata: metadata.matchMetadata, markers, chunk_manifest: activeManifest ?? {}, local_original_filename: filename, original_mime_type: contentType, duration_seconds: activeManifest?.durationEstimateSeconds }) });
     if (!completed.conversion_job) {
       if (rawFormat === "webm") await api("/exports/convert", { method: "POST", body: JSON.stringify({ project_id: created.project.id, video_id: completed.video.id, source_object_key: objectKey, source_format: "webm", target_format: "mp4" }) });
     }
-    await api("/jobs/analyze", { method: "POST", body: JSON.stringify({ projectId: created.project.id, videoId: completed.video.id }) });
     if (activeManifest) { activeManifest.uploadStatus = "uploaded"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }); }
-    setText("uploadStatus", rawFormat === "webm" ? "Uploaded. MP4 conversion and analysis are queued for backend processing." : "Uploaded. Analysis is queued for backend processing.");
-    el("projectLink").innerHTML = `<a href="https://app.videoblitzer.com/projects/${created.project.id}/overview">Open project in web app</a>`;
+    uploadedVideoState = { ...completed.video, project_id: completed.video.project_id ?? created.project.id };
+    packageJobState = null;
+    const socialUrl = socialProductionUrl(created.project.id);
+    setText("uploadStatus", uploadedVideoState.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
+    el("projectLink").innerHTML = `<a href="${socialUrl}">Open Social Media Production</a>`;
     updatePackageSummary();
+    renderPackageState();
     setStatus("Uploaded");
-    showScreen("download");
   } catch (error) {
     if (activeManifest) { activeManifest.uploadStatus = "failed"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setStatus("Upload failed");
     setText("uploadStatus", friendlyUploadError(error));
+  }
+}
+
+async function refreshPackageJob(jobId: string) {
+  const response = await api<{ packageJob: PackageJobState }>(`/packages/${jobId}`);
+  packageJobState = response.packageJob;
+  renderPackageState();
+  if (packageJobState.status === "completed" || packageJobState.status === "failed") {
+    if (packagePollInterval) window.clearInterval(packagePollInterval);
+    packagePollInterval = undefined;
+  }
+}
+
+function startPackagePolling(jobId: string) {
+  if (packagePollInterval) window.clearInterval(packagePollInterval);
+  packagePollInterval = window.setInterval(() => {
+    void refreshPackageJob(jobId).catch((error) => renderPackageState(error instanceof Error ? error.message : "Could not refresh package status.", true));
+  }, 5000);
+}
+
+async function producePackage() {
+  if (!uploadedVideoState) { renderPackageState("Upload a verified video before producing a package.", true); return; }
+  if (uploadedVideoState.has_video !== true) { renderPackageState("This file contains audio only. Social media video packages require a video stream.", true); return; }
+  try {
+    renderPackageState("Queueing package production...");
+    const response = await api<{ job_id: string; status: string; job?: PackageJobState }>("/packages/generate", { method: "POST", body: JSON.stringify({ projectId: uploadedVideoState.project_id, videoId: uploadedVideoState.id }) });
+    packageJobState = response.job ?? { id: response.job_id, status: response.status, stage: "queued", progress: 0 };
+    renderPackageState(`Package queued: ${response.job_id}`);
+    startPackagePolling(response.job_id);
+    await refreshPackageJob(response.job_id).catch(() => undefined);
+  } catch (error) {
+    renderPackageState(error instanceof Error ? error.message : "Could not produce package.", true);
+  }
+}
+
+async function downloadPackageZip() {
+  if (!packageJobState?.id) { renderPackageState("Produce a package before downloading the ZIP.", true); return; }
+  try {
+    const response = await api<{ downloadUrl?: string | null }>(`/packages/${packageJobState.id}/download`);
+    if (!response.downloadUrl) throw new Error("Package ZIP download is not available yet.");
+    if (bridgeAvailable) await bridge().openExternal(response.downloadUrl);
+    else window.open(response.downloadUrl, "_blank");
+    renderPackageState("Opened package ZIP download.");
+  } catch (error) {
+    renderPackageState(error instanceof Error ? error.message : "Could not download package ZIP.", true);
   }
 }
 
@@ -1761,6 +1873,44 @@ async function selectCombineFile(kind: "video" | "audio") {
   else { combineAudioPath = file; setText("combineAudioPath", `${file} · duration ${meta.durationSeconds?.toFixed(1) ?? "unknown"}s`); }
 }
 
+async function selectUploadVideo() {
+  const file = await window.videoBlitzerRecorder.selectMediaFile("video");
+  if (!file) return;
+  combineVideoPath = file;
+  const imported = await window.videoBlitzerRecorder.copyLocalFile(file, settings.outputFolder);
+  selectRecording(imported);
+  setText("reviewSource", "Imported local video");
+  setText("uploadStatus", "Local video imported. Upload now, or select optional audio and create a combined upload MP4.");
+  void window.videoBlitzerRecorder.mediaMetadata(file).then((meta) => {
+    setText("combineVideoPath", `${file} · duration ${meta.durationSeconds?.toFixed(1) ?? "unknown"}s`);
+  }).catch(() => setText("combineVideoPath", file));
+}
+
+async function prepareUploadMedia() {
+  try {
+    if (!combineVideoPath) throw new Error("Select a local video first.");
+    if (!combineAudioPath) {
+      setText("uploadStatus", "No separate audio selected. Uploading the selected video file as-is.");
+      return;
+    }
+    const offset = Number(el<HTMLInputElement>("audioOffset").value);
+    if (!Number.isFinite(offset)) throw new Error("Audio offset must be a valid number.");
+    const output = await window.videoBlitzerRecorder.combineVideoAudio({
+      videoPath: combineVideoPath,
+      audioPath: combineAudioPath,
+      outputFolder: settings.outputFolder,
+      filename: `VideoBlitzer_Upload_${timestamp()}.mp4`,
+      offsetSeconds: offset,
+      trimToShortest: el<HTMLInputElement>("trimShortest").checked,
+    });
+    selectRecording(output);
+    setText("combineStatus", `Combined MP4 saved: ${output.filePath}`);
+    setText("uploadStatus", "Video and audio were combined successfully. Upload is ready.");
+  } catch (error) {
+    setText("uploadStatus", error instanceof Error ? error.message : "Could not prepare upload media.");
+  }
+}
+
 async function combineMedia() {
   try {
     if (!combineVideoPath || !combineAudioPath) throw new Error("Select both a video file and an audio file.");
@@ -2043,7 +2193,17 @@ async function init() {
   el("refreshSources").addEventListener("click", () => void refreshSources());
   el("startRecording").addEventListener("click", () => void startRecording());
   el("stopRecording").addEventListener("click", stopRecording);
+  el("selectUploadVideo").addEventListener("click", () => void selectUploadVideo());
+  el("selectUploadAudio").addEventListener("click", () => void selectCombineFile("audio").then(() => setText("uploadStatus", "Optional audio selected. Click Create Upload MP4 (Video + Audio) to merge.")));
+  el("prepareUploadMedia").addEventListener("click", () => void prepareUploadMedia());
   el("uploadRecording").addEventListener("click", () => void uploadRecording());
+  el("producePackage").addEventListener("click", () => void producePackage());
+  el("openSocialProduction").addEventListener("click", () => {
+    if (!uploadedVideoState) return;
+    if (bridgeAvailable) void bridge().openExternal(socialProductionUrl(uploadedVideoState.project_id));
+    else window.open(socialProductionUrl(uploadedVideoState.project_id), "_blank");
+  });
+  el("downloadPackageZip").addEventListener("click", () => void downloadPackageZip());
   el("openLocation").addEventListener("click", () => { if (savedFile && bridgeAvailable) void bridge().openFileLocation(savedFile.filePath); });
   el("openProjectFromPackage").addEventListener("click", () => {
     const link = el("projectLink").querySelector("a") as HTMLAnchorElement | null;
