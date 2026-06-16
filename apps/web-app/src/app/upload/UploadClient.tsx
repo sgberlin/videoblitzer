@@ -12,6 +12,7 @@ type PackageJobResponse = { job_id: string; status: string };
 type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
+type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
 
 function contentTypeForVideo(file: File) {
   if (file.type) return file.type;
@@ -170,10 +171,19 @@ export function UploadClient() {
       }
 
       setStatus("Verifying R2 upload with HeadObject...");
-      await apiFetch("/uploads/verify", {
+      const verification = await apiFetch<UploadVerificationResponse>("/uploads/verify", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
       }, auth.session.access_token);
+      if (audioFile && verification.media?.has_audio === true) {
+        const shouldOverrideAudio = window.confirm("This video already contains audio. Do you want to replace the video's audio with the separate audio file for package production?");
+        if (!shouldOverrideAudio) {
+          setStatus("Upload stopped before package setup. Remove the separate audio file or confirm audio replacement, then upload again.");
+          setProgress((current) => ({ ...current, state: "failed" }));
+          setAudioProgress((current) => ({ ...current, state: "failed" }));
+          return;
+        }
+      }
 
       setStatus("Saving video record...");
       const completed = await apiFetch<CompletedUpload>("/uploads/complete", {
@@ -249,6 +259,7 @@ export function UploadClient() {
         <input className="input" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm" onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)} />
         {audioFile && <p className="muted">Optional audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
         <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is merged with the video by the package worker.</p>
+        {audioFile && <p className="warning">If the video already contains audio, VideoBlitzer will ask before replacing it with this separate audio file.</p>}
         <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Upload Existing Video"}</button>
         <p className={progress.state === "failed" ? "warning" : progress.state === "complete" ? "status" : "muted"}>{status}</p>
         <div className="card">
@@ -270,7 +281,7 @@ export function UploadClient() {
             ? <p className="status">Upload verified. Ready to produce package.</p>
             : <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
-          {audioFile && <p className="status">Separate audio uploaded. The package worker will merge it with the video before creating clips and exports.</p>}
+          {audioFile && <p className="status">Separate audio uploaded. The package worker will replace the video's original audio with this track before creating clips and exports.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
           <button className="button" onClick={() => void producePackage()} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Package"}</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
