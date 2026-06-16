@@ -44,6 +44,26 @@ export async function createNormalizedMaster(inputPath: string, outputPath: stri
   ], { timeoutMs: ffmpegTimeoutMs });
 }
 
+export async function createNormalizedMasterWithAudio(videoPath: string, audioPath: string, outputPath: string) {
+  await runCommand("ffmpeg", [
+    "-y",
+    "-i", videoPath,
+    "-i", audioPath,
+    "-map", "0:v:0",
+    "-map", "1:a:0",
+    "-shortest",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "20",
+    "-pix_fmt", "yuv420p",
+    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+    "-c:a", "aac",
+    "-b:a", "192k",
+    "-movflags", "+faststart",
+    outputPath,
+  ], { timeoutMs: ffmpegTimeoutMs });
+}
+
 export async function renderPresetExport(inputPath: string, outputPath: string, preset: ExportPreset) {
   await runCommand("ffmpeg", [
     "-y",

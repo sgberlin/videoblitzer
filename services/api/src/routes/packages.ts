@@ -22,7 +22,7 @@ async function latestOwnedVideoForProject(userId: string, projectId: string) {
   if (!supabase) throw new Error("Supabase service role is required.");
   const { data, error } = await supabase
     .from("videos")
-    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height")
+    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata")
     .eq("project_id", projectId)
     .eq("owner_id", userId)
     .order("created_at", { ascending: false })
@@ -98,6 +98,11 @@ packagesRouter.post("/generate", async (req, res) => {
       durationSeconds: video.duration_seconds,
       width: video.width,
       height: video.height,
+      audioSourceObjectKey: video.audio_source_object_key,
+      audioSourceFilename: video.audio_source_filename,
+      audioSourceContentType: video.audio_source_content_type,
+      audioSourceSizeBytes: video.audio_source_size_bytes,
+      audioSourceMetadata: video.audio_source_metadata,
     presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
     includeClipPlan: body.includeClipPlan,
   };

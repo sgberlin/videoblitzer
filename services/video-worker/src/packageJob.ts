@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { analyzeStage } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
-import { createNormalizedMaster, exportStage, socialClipStage } from "./exportStage";
+import { createNormalizedMaster, createNormalizedMasterWithAudio, exportStage, socialClipStage } from "./exportStage";
 import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
 import type { ExportArtifact, PackageJob, PackageManifest, PackageStatus, VideoRow } from "./packageTypes";
 
@@ -213,7 +213,7 @@ async function claimQueuedPackageJob(client: WorkerClient) {
 async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
   const { data, error } = await client
     .from("videos")
-    .select("id,project_id,storage_key,source_object_key,source_format,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,markers")
+    .select("id,project_id,storage_key,source_object_key,source_format,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,markers")
     .eq("id", job.video_id)
     .eq("owner_id", job.user_id)
     .maybeSingle();
@@ -450,17 +450,22 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     }
     const sourceObjectKey = String((job.input?.sourceObjectKey as string | undefined) ?? video.storage_key ?? video.source_object_key ?? "");
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
+    const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
 
     const sourcePath = path.join(workdir, "source-input");
+    const audioSourcePath = path.join(workdir, "audio-sidecar-input");
     const normalizedMasterPath = path.join(workdir, "normalized-master.mp4");
     const exportsDir = path.join(workdir, "exports");
     await mkdir(exportsDir, { recursive: true });
 
-    await markStage(client, job, "download_source", 15, { sourceObjectKey });
-    await withHeartbeat(client, job, "download_source", () => downloadR2File(sourceObjectKey, sourcePath));
+    await markStage(client, job, "download_source", 15, { sourceObjectKey, audioSourceObjectKey: audioSourceObjectKey || undefined });
+    await withHeartbeat(client, job, "download_source", async () => {
+      await downloadR2File(sourceObjectKey, sourcePath);
+      if (audioSourceObjectKey) await downloadR2File(audioSourceObjectKey, audioSourcePath);
+    });
 
-    await markStage(client, job, "normalize_master", 25);
-    await withHeartbeat(client, job, "normalize_master", () => createNormalizedMaster(sourcePath, normalizedMasterPath));
+    await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey) });
+    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath) : createNormalizedMaster(sourcePath, normalizedMasterPath));
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
     const masterAsset: ExportArtifactWithPath = {
@@ -521,6 +526,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       projectId: job.project_id,
       videoId: job.video_id,
       sourceObjectKey,
+      audioSourceObjectKey: audioSourceObjectKey || null,
       generatedAt: new Date().toISOString(),
       analysis: { durationSeconds: analysis.durationSeconds },
       normalizedMaster: { objectKey: masterObjectKey, fileName: "normalized-master.mp4" },

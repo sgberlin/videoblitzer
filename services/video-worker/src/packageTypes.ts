@@ -25,6 +25,11 @@ export type VideoRow = {
   duration_seconds?: number | null;
   width?: number | null;
   height?: number | null;
+  audio_source_object_key?: string | null;
+  audio_source_filename?: string | null;
+  audio_source_content_type?: string | null;
+  audio_source_size_bytes?: number | null;
+  audio_source_metadata?: Record<string, unknown> | null;
   markers: Array<{ seconds?: number; label?: string; note?: string; createdAt?: string }>;
 };
 
@@ -72,6 +77,7 @@ export type PackageManifest = {
   projectId: string;
   videoId: string | null;
   sourceObjectKey: string;
+  audioSourceObjectKey?: string | null;
   generatedAt: string;
   analysis: Pick<AnalysisResult, "durationSeconds">;
   normalizedMaster: {

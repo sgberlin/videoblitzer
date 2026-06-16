@@ -13,13 +13,26 @@ type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete"
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 
-function contentTypeFor(file: File) {
+function contentTypeForVideo(file: File) {
   if (file.type) return file.type;
   const extension = file.name.split(".").pop()?.toLowerCase();
   if (extension === "mov") return "video/quicktime";
   if (extension === "mkv") return "video/x-matroska";
   if (extension === "webm") return "video/webm";
   return "video/mp4";
+}
+
+function contentTypeForAudio(file: File) {
+  if (file.type) return file.type;
+  const extension = file.name.split(".").pop()?.toLowerCase();
+  if (extension === "mp3") return "audio/mpeg";
+  if (extension === "m4a") return "audio/mp4";
+  if (extension === "aac") return "audio/aac";
+  if (extension === "wav") return "audio/wav";
+  if (extension === "webm") return "audio/webm";
+  if (extension === "ogg") return "audio/ogg";
+  if (extension === "flac") return "audio/flac";
+  return "audio/mpeg";
 }
 
 function formatBytes(value: number) {
@@ -35,7 +48,7 @@ function formatEta(seconds: number | null) {
   return `${minutes}m ${remainder}s`;
 }
 
-function uploadToSignedUrl(file: File, signed: SignedUpload, onProgress: (value: UploadProgress) => void) {
+function uploadToSignedUrl(file: File, signed: SignedUpload, contentType: string, onProgress: (value: UploadProgress) => void) {
   return new Promise<void>((resolve, reject) => {
     if (!signed.uploadUrl) {
       reject(new Error("The API could not create a signed R2 upload URL. Check the server-side R2 environment on the VPS."));
@@ -45,7 +58,7 @@ function uploadToSignedUrl(file: File, signed: SignedUpload, onProgress: (value:
     const xhr = new XMLHttpRequest();
     const startedAt = Date.now();
     xhr.open(signed.method ?? "PUT", signed.uploadUrl);
-    xhr.setRequestHeader("Content-Type", contentTypeFor(file));
+    xhr.setRequestHeader("Content-Type", contentType);
     xhr.upload.onprogress = (event) => {
       if (event.lengthComputable) {
         const elapsedSeconds = Math.max(0.001, (Date.now() - startedAt) / 1000);
@@ -69,10 +82,12 @@ function uploadToSignedUrl(file: File, signed: SignedUpload, onProgress: (value:
 
 export function UploadClient() {
   const [file, setFile] = useState<File | null>(null);
+  const [audioFile, setAudioFile] = useState<File | null>(null);
   const [title, setTitle] = useState("Match Upload");
   const [projects, setProjects] = useState<DashboardProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("new");
   const [progress, setProgress] = useState<UploadProgress>({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
+  const [audioProgress, setAudioProgress] = useState<UploadProgress>({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
   const [status, setStatus] = useState("Choose a video file to start.");
   const [projectUrl, setProjectUrl] = useState("");
   const [uploadedVideo, setUploadedVideo] = useState<UploadedVideoState | null>(null);
@@ -122,6 +137,7 @@ export function UploadClient() {
     if (!file) { setStatus("Select an mp4, mov, mkv, or webm file first."); return; }
     setBusy(true);
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: file.size, speedBytesPerSecond: 0, etaSeconds: null, state: "preparing" });
+    setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: audioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: audioFile ? "preparing" : "idle" });
     setProjectUrl("");
     setUploadedVideo(null);
     setPackageStatus("");
@@ -131,17 +147,27 @@ export function UploadClient() {
       setProgress((current) => ({ ...current, state: "preparing" }));
       setStatus(selectedProjectId === "new" ? "Creating project..." : "Preparing selected project...");
       const created = await resolveProject(file);
-      const contentType = contentTypeFor(file);
+      const contentType = contentTypeForVideo(file);
+      const audioContentType = audioFile ? contentTypeForAudio(audioFile) : null;
 
       setStatus("Requesting signed R2 upload URL...");
       const signed = await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType }),
       }, auth.session.access_token);
+      const signedAudio = audioFile && audioContentType ? await apiFetch<SignedUpload>("/uploads/create-signed-url", {
+        method: "POST",
+        body: JSON.stringify({ projectId: created.project.id, filename: audioFile.name, contentType: audioContentType }),
+      }, auth.session.access_token) : null;
 
       setStatus("Uploading directly to Cloudflare R2...");
-      await uploadToSignedUrl(file, signed, setProgress);
+      await uploadToSignedUrl(file, signed, contentType, setProgress);
       setProgress((current) => ({ ...current, percent: 100, loadedBytes: file.size, totalBytes: file.size, etaSeconds: 0, state: "verifying" }));
+      if (audioFile && signedAudio && audioContentType) {
+        setStatus("Uploading optional audio track to Cloudflare R2...");
+        await uploadToSignedUrl(audioFile, signedAudio, audioContentType, setAudioProgress);
+        setAudioProgress((current) => ({ ...current, percent: 100, loadedBytes: audioFile.size, totalBytes: audioFile.size, etaSeconds: 0, state: "verifying" }));
+      }
 
       setStatus("Verifying R2 upload with HeadObject...");
       await apiFetch("/uploads/verify", {
@@ -152,15 +178,29 @@ export function UploadClient() {
       setStatus("Saving video record...");
       const completed = await apiFetch<CompletedUpload>("/uploads/complete", {
         method: "POST",
-        body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
+        body: JSON.stringify({
+          projectId: created.project.id,
+          filename: file.name,
+          contentType,
+          storageKey: signed.key,
+          sizeBytes: file.size,
+          audio_source: audioFile && signedAudio && audioContentType ? {
+            object_key: signedAudio.key,
+            filename: audioFile.name,
+            content_type: audioContentType,
+            size_bytes: audioFile.size,
+          } : undefined,
+        }),
       }, auth.session.access_token);
 
       setProgress((current) => ({ ...current, state: "complete" }));
+      if (audioFile) setAudioProgress((current) => ({ ...current, state: "complete" }));
       setUploadedVideo(completed.video);
       setStatus(completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
       setProjectUrl(`/projects/${created.project.id}/social-production`);
     } catch (error) {
       setProgress((current) => ({ ...current, state: "failed" }));
+      if (audioFile) setAudioProgress((current) => ({ ...current, state: "failed" }));
       setStatus(error instanceof Error ? error.message : "Upload failed. Please try again.");
     } finally {
       setBusy(false);
@@ -190,7 +230,7 @@ export function UploadClient() {
 
   return <section className="hero">
     <h1>Upload Existing Video</h1>
-    <p className="muted">Accepted formats: mp4, mov, mkv, webm. Videos upload directly to Cloudflare R2 using signed URLs created by the API.</p>
+    <p className="muted">Accepted video formats: mp4, mov, mkv, webm. Optional separate audio can be uploaded as mp3, wav, m4a, aac, ogg, flac, or webm.</p>
     <div className="grid grid-2">
       <div className="card">
         <h3>Upload Existing Video</h3>
@@ -201,16 +241,27 @@ export function UploadClient() {
         </select>
         {selectedProjectId === "new" && <><br /><br /><input className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Project title" /></>}
         <br /><br />
+        <label>Video file</label>
         <input className="input" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
         {file && <p className="muted">Selected: {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</p>}
-        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the R2 object exists and that the size matches before enabling package production.</p>
+        <br /><br />
+        <label>Optional separate audio file</label>
+        <input className="input" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm" onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)} />
+        {audioFile && <p className="muted">Optional audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
+        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is merged with the video by the package worker.</p>
         <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Upload Existing Video"}</button>
         <p className={progress.state === "failed" ? "warning" : progress.state === "complete" ? "status" : "muted"}>{status}</p>
         <div className="card">
-          <strong>{progress.percent}% uploaded</strong>
+          <strong>Video: {progress.percent}% uploaded</strong>
           <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}><div style={{ width: `${progress.percent}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} /></div>
           <p className="muted">State: {progress.state}</p>
           <p className="muted">{formatBytes(progress.loadedBytes)} / {formatBytes(progress.totalBytes || file?.size || 0)} · {formatBytes(progress.speedBytesPerSecond)}/s · ETA {formatEta(progress.etaSeconds)}</p>
+          {audioFile && <>
+            <strong>Audio: {audioProgress.percent}% uploaded</strong>
+            <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}><div style={{ width: `${audioProgress.percent}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} /></div>
+            <p className="muted">Audio state: {audioProgress.state}</p>
+            <p className="muted">{formatBytes(audioProgress.loadedBytes)} / {formatBytes(audioProgress.totalBytes || audioFile.size)} · {formatBytes(audioProgress.speedBytesPerSecond)}/s · ETA {formatEta(audioProgress.etaSeconds)}</p>
+          </>}
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
         {uploadedVideo && <div className="card">
@@ -219,6 +270,7 @@ export function UploadClient() {
             ? <p className="status">Upload verified. Ready to produce package.</p>
             : <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
+          {audioFile && <p className="status">Separate audio uploaded. The package worker will merge it with the video before creating clips and exports.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
           <button className="button" onClick={() => void producePackage()} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Package"}</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
