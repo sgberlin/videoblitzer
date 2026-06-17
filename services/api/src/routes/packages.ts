@@ -43,6 +43,59 @@ type PackageVideo = {
 export const packagesRouter = Router();
 packagesRouter.use(requireAuth, jobRateLimit);
 
+function isMissingEnqueueRpc(error: unknown) {
+  const message = typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message : String(error);
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
+  return code === "PGRST202" || message.includes("enqueue_package_job_atomic") || message.includes("function") && message.includes("not found");
+}
+
+async function enqueuePackageJobDirect(input: {
+  supabase: NonNullable<ReturnType<typeof createServiceClient>>;
+  jobId: string;
+  projectId: string;
+  videoId: string;
+  userId: string;
+  jobInput: Record<string, unknown>;
+}) {
+  const packageRow = {
+    id: input.jobId,
+    project_id: input.projectId,
+    video_id: input.videoId,
+    user_id: input.userId,
+    status: "queued",
+    progress: 0,
+    stage: "queued",
+    input: input.jobInput,
+    stage_started_at: new Date().toISOString(),
+    last_heartbeat_at: new Date().toISOString(),
+  };
+  const packageInsert = await input.supabase.from("package_jobs").insert(packageRow);
+  if (packageInsert.error) {
+    if (!isSchemaCacheMissingColumn(packageInsert.error)) throw new Error(packageInsert.error.message);
+    const fallbackInsert = await input.supabase.from("package_jobs").insert({
+      id: input.jobId,
+      project_id: input.projectId,
+      video_id: input.videoId,
+      user_id: input.userId,
+      status: "queued",
+      progress: 0,
+      input: input.jobInput,
+    });
+    if (fallbackInsert.error) throw new Error(fallbackInsert.error.message);
+  }
+  const mirrorInsert = await input.supabase.from("jobs").insert({
+    id: input.jobId,
+    project_id: input.projectId,
+    user_id: input.userId,
+    type: "social_content_pack",
+    status: "queued",
+    progress: 0,
+    input: input.jobInput,
+    output: { stage: "queued" },
+  });
+  if (mirrorInsert.error) throw new Error(mirrorInsert.error.message);
+}
+
 async function latestOwnedVideoForProject(userId: string, projectId: string) {
   const supabase = createServiceClient();
   if (!supabase) throw new Error("Supabase service role is required.");
@@ -153,7 +206,10 @@ packagesRouter.post("/generate", async (req, res) => {
       p_user_id: req.user!.id,
       p_input: jobInput,
     });
-    if (enqueueError) throw new Error(enqueueError.message);
+    if (enqueueError) {
+      if (!isMissingEnqueueRpc(enqueueError) && !isSchemaCacheMissingColumn(enqueueError)) throw new Error(enqueueError.message);
+      await enqueuePackageJobDirect({ supabase, jobId, projectId: body.projectId, videoId: video.id, userId: req.user!.id, jobInput });
+    }
     await supabase.from("usage_events").insert({
       user_id: req.user!.id,
       project_id: body.projectId,
