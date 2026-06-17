@@ -213,13 +213,23 @@ async function claimQueuedPackageJob(client: WorkerClient) {
 async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
   const { data, error } = await client
     .from("videos")
-    .select("id,project_id,storage_key,source_object_key,source_format,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,markers")
+    .select("id,project_id,storage_key,source_object_key,source_format,markers,verification_metadata")
     .eq("id", job.video_id)
     .eq("owner_id", job.user_id)
     .maybeSingle();
   if (error) throw new Error(error.message);
   if (!data) throw new Error("Package video was not found.");
-  return data as VideoRow;
+  const verification = ((data as VideoRow).verification_metadata ?? {}) as Record<string, unknown>;
+  const media = (verification.media ?? {}) as Record<string, unknown>;
+  const audioSource = (verification.audioSource ?? {}) as Record<string, unknown>;
+  const hasAudioSource = Object.keys(audioSource).length > 0;
+  return {
+    ...data,
+    has_video: job.input?.hasVideo ?? media.has_video ?? false,
+    has_audio: job.input?.hasAudio ?? (hasAudioSource ? true : media.has_audio ?? false),
+    audio_source_object_key: job.input?.audioSourceObjectKey ?? audioSource.objectKey ?? null,
+    audio_source_metadata: (job.input?.audioSourceMetadata as Record<string, unknown> | undefined) ?? (hasAudioSource ? audioSource : {}),
+  } as VideoRow;
 }
 
 async function cleanupPreviousPackageRows(client: WorkerClient, job: PackageJob) {

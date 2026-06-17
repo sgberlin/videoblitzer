@@ -3,7 +3,7 @@ import { z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { jobRateLimit } from "../middleware/rateLimit";
 import { createServiceClient } from "../supabase";
-import { getOwnedVideo, userOwnsProject } from "../lib/ownership";
+import { getOwnedVideo, hydrateVideoMetadata, isSchemaCacheMissingColumn, userOwnsProject } from "../lib/ownership";
 import { createSignedDownloadUrl } from "../lib/r2";
 import { enforceCredits, refundCredits } from "../lib/creditLedger";
 
@@ -13,6 +13,32 @@ const packageInputSchema = z.object({
   presetIds: z.array(z.string().min(2).max(80)).max(12).optional(),
   includeClipPlan: z.boolean().default(true),
 });
+const extendedVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,verification_metadata";
+const baseVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,verification_metadata";
+type PackageVideo = {
+  id: string;
+  project_id: string;
+  storage_key?: string | null;
+  source_object_key?: string | null;
+  source_format?: string | null;
+  content_type?: string | null;
+  mime_type?: string | null;
+  verification_status?: string | null;
+  verified_at?: string | null;
+  verified_size_bytes?: number | null;
+  has_video?: boolean | null;
+  has_audio?: boolean | null;
+  video_codec?: string | null;
+  audio_codec?: string | null;
+  duration_seconds?: number | null;
+  width?: number | null;
+  height?: number | null;
+  audio_source_object_key?: string | null;
+  audio_source_filename?: string | null;
+  audio_source_content_type?: string | null;
+  audio_source_size_bytes?: number | null;
+  audio_source_metadata?: Record<string, unknown> | null;
+};
 
 export const packagesRouter = Router();
 packagesRouter.use(requireAuth, jobRateLimit);
@@ -22,23 +48,33 @@ async function latestOwnedVideoForProject(userId: string, projectId: string) {
   if (!supabase) throw new Error("Supabase service role is required.");
   const { data, error } = await supabase
     .from("videos")
-    .select("id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata")
+    .select(extendedVideoSelect)
     .eq("project_id", projectId)
     .eq("owner_id", userId)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
-  if (error) throw new Error(error.message);
-  return data;
+  if (!error) return hydrateVideoMetadata(data);
+  if (!isSchemaCacheMissingColumn(error)) throw new Error(error.message);
+  const fallback = await supabase
+    .from("videos")
+    .select(baseVideoSelect)
+    .eq("project_id", projectId)
+    .eq("owner_id", userId)
+    .order("created_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (fallback.error) throw new Error(fallback.error.message);
+  return hydrateVideoMetadata(fallback.data);
 }
 
 packagesRouter.post("/generate", async (req, res) => {
   const body = packageInputSchema.parse(req.body);
   if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
 
-  const video = body.videoId
+  const video = (body.videoId
     ? await getOwnedVideo(req.user!.id, body.videoId)
-    : await latestOwnedVideoForProject(req.user!.id, body.projectId);
+    : await latestOwnedVideoForProject(req.user!.id, body.projectId)) as PackageVideo | null;
   if (!video) return res.status(404).json({ error: "No uploaded video is available for this project yet." });
   if (video.project_id !== body.projectId) return res.status(400).json({ error: "Selected video does not belong to the requested project." });
   if (video.verification_status !== "verified") {

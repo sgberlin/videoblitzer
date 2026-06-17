@@ -30,6 +30,7 @@ export type VideoRow = {
   audio_source_content_type?: string | null;
   audio_source_size_bytes?: number | null;
   audio_source_metadata?: Record<string, unknown> | null;
+  verification_metadata?: Record<string, unknown> | null;
   markers: Array<{ seconds?: number; label?: string; note?: string; createdAt?: string }>;
 };
 
