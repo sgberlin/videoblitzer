@@ -77,6 +77,45 @@ async function markStage(client: WorkerClient, job: PackageJob, stage: string, p
   });
 }
 
+function clampProgress(value: number) {
+  return Math.min(99, Math.max(0, Math.round(value)));
+}
+
+function stageProgressReporter(input: {
+  client: WorkerClient;
+  job: PackageJob;
+  stage: string;
+  startProgress: number;
+  endProgress: number;
+  throttleMs?: number;
+}) {
+  let lastUpdateAt = 0;
+  let lastProgress = -1;
+  return async (progress: { percent: number; seconds?: number; label?: string; current?: number; total?: number }) => {
+    const nowMs = Date.now();
+    const stagePercent = Math.min(100, Math.max(0, Math.round(progress.percent)));
+    const overallProgress = clampProgress(input.startProgress + ((input.endProgress - input.startProgress) * stagePercent) / 100);
+    if (overallProgress === lastProgress && nowMs - lastUpdateAt < (input.throttleMs ?? 4000)) return;
+    if (nowMs - lastUpdateAt < (input.throttleMs ?? 4000) && stagePercent < 100) return;
+    lastUpdateAt = nowMs;
+    lastProgress = overallProgress;
+    await updatePackageState(input.client, input.job.id, "processing", {
+      progress: overallProgress,
+      stage: input.stage,
+      last_heartbeat_at: new Date().toISOString(),
+      output: {
+        stage: input.stage,
+        stageUpdatedAt: new Date().toISOString(),
+        stageProgressPercent: stagePercent,
+        ffmpegSeconds: typeof progress.seconds === "number" ? Number(progress.seconds.toFixed(1)) : undefined,
+        itemLabel: progress.label,
+        itemIndex: progress.current,
+        itemTotal: progress.total,
+      },
+    });
+  };
+}
+
 async function heartbeat(client: WorkerClient, job: PackageJob, stage: string) {
   const now = new Date().toISOString();
   await client.from("package_jobs").update({ last_heartbeat_at: now, locked_at: now, stage, updated_at: now }).eq("id", job.id);
@@ -227,6 +266,7 @@ async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
     ...data,
     has_video: job.input?.hasVideo ?? media.has_video ?? false,
     has_audio: job.input?.hasAudio ?? (hasAudioSource ? true : media.has_audio ?? false),
+    duration_seconds: job.input?.durationSeconds ?? media.duration_seconds ?? null,
     audio_source_object_key: job.input?.audioSourceObjectKey ?? audioSource.objectKey ?? null,
     audio_source_metadata: (job.input?.audioSourceMetadata as Record<string, unknown> | undefined) ?? (hasAudioSource ? audioSource : {}),
   } as VideoRow;
@@ -462,6 +502,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
     const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
     const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
+    const sourceDurationSeconds = typeof video.duration_seconds === "number" ? video.duration_seconds : undefined;
 
     const sourcePath = path.join(workdir, "source-input");
     const audioSourcePath = path.join(workdir, "audio-sidecar-input");
@@ -476,7 +517,10 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     });
 
     await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey) });
-    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath) : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports));
+    const reportNormalizeProgress = stageProgressReporter({ client, job, stage: "normalize_master", startProgress: 25, endProgress: 40 });
+    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey
+      ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress)
+      : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports, sourceDurationSeconds, reportNormalizeProgress));
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
     const masterAsset: ExportArtifactWithPath = {
@@ -500,6 +544,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     await persistClipPlan(client, job, analysis.clipPlan);
 
     await markStage(client, job, "rendering_clips", 55, { clipPlanCount: analysis.clipPlan.length });
+    const reportClipProgress = stageProgressReporter({ client, job, stage: "rendering_clips", startProgress: 55, endProgress: 70 });
     const { clipArtifacts, thumbnailArtifacts } = await withHeartbeat(client, job, "rendering_clips", () => socialClipStage({
       masterPath: normalizedMasterPath,
       workdir,
@@ -508,10 +553,12 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       projectId: job.project_id,
       packageJobId: job.id,
       hasAudio: hasAudioForExports,
+      onProgress: reportClipProgress,
     }));
 
     await markStage(client, job, "preset_exports", 70, { clipAssetCount: clipArtifacts.length });
     const requestedPresetIds = Array.isArray(job.input?.presetIds) ? (job.input?.presetIds as string[]) : [];
+    const reportExportProgress = stageProgressReporter({ client, job, stage: "preset_exports", startProgress: 70, endProgress: 82 });
     const exportArtifactsWithPaths = await withHeartbeat(client, job, "preset_exports", () => exportStage({
       masterPath: normalizedMasterPath,
       exportsDir,
@@ -520,6 +567,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       projectId: job.project_id,
       packageJobId: job.id,
       hasAudio: hasAudioForExports,
+      durationSeconds: analysis.durationSeconds,
+      onProgress: reportExportProgress,
     }));
     const exportArtifacts = exportArtifactsWithPaths.map(({ filePath: _filePath, ...artifact }) => artifact);
     await persistExports(client, job, exportArtifacts);

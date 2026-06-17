@@ -89,6 +89,11 @@ function formatStageElapsed(value: unknown) {
   return `${minutes}m ${seconds}s`;
 }
 
+function numberFromOutput(output: Record<string, unknown> | undefined, key: string) {
+  const value = output?.[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
 function friendlyPackageError(error: unknown) {
   const message = error instanceof Error ? error.message : "Could not produce package.";
   if (message.toLowerCase() === "failed to fetch") return "Could not contact the API. Check deployment/network status, then try Produce Package again.";
@@ -107,11 +112,16 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";
   const elapsed = formatStageElapsed(job?.output?.stageUpdatedAt);
   const totalElapsed = formatStageElapsed(job?.created_at ?? job?.output?.stageUpdatedAt);
+  const activeStageProgress = numberFromOutput(job?.output, "stageProgressPercent");
+  const itemLabel = typeof job?.output?.itemLabel === "string" ? job.output.itemLabel : "";
+  const itemIndex = numberFromOutput(job?.output, "itemIndex");
+  const itemTotal = numberFromOutput(job?.output, "itemTotal");
   const note = slowStageNotes[stage];
   return <div className="card">
     <h3>Package Progress</h3>
     <p className="muted">Total time passed: {totalElapsed || "not started"}</p>
     <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%{elapsed ? ` · running ${elapsed}` : ""}</p>
+    {activeStageProgress !== null && job?.status === "processing" && <p className="status">Current step: {activeStageProgress}%{itemLabel ? ` · ${itemLabel}` : ""}{itemIndex && itemTotal ? ` (${itemIndex}/${itemTotal})` : ""}</p>}
     {note && job?.status === "processing" && <p className="muted">{note}</p>}
     <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}>
       <div style={{ width: `${progress}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} />
@@ -120,7 +130,7 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
       {packageStages.map((item, index) => {
         const reached = Boolean(job) && index <= activeIndex;
         const current = Boolean(job) && index === activeIndex && job?.status !== "completed";
-        const itemProgress = job?.status === "completed" ? 100 : stagePercent(item, progress);
+        const itemProgress = job?.status === "completed" ? 100 : current && activeStageProgress !== null ? activeStageProgress : stagePercent(item, progress);
         return <p key={item.key} className={reached ? "status" : "muted"}>{reached ? "[x]" : "[ ]"} {current ? "Now: " : ""}{item.label} · {itemProgress}%</p>;
       })}
     </div>
