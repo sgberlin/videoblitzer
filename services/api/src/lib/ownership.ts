@@ -6,7 +6,7 @@ const baseVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,so
 export function isSchemaCacheMissingColumn(error: unknown) {
   const message = typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message : String(error);
   const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
-  return code === "PGRST204" || (message.includes("Could not find") && message.includes("schema cache"));
+  return code === "42703" || code === "PGRST204" || (message.includes("Could not find") && message.includes("schema cache"));
 }
 
 export function hydrateVideoMetadata<T extends Record<string, unknown> | null>(row: T) {
