@@ -12,6 +12,7 @@ const packageInputSchema = z.object({
   videoId: z.string().uuid().optional(),
   presetIds: z.array(z.string().min(2).max(80)).max(12).optional(),
   includeClipPlan: z.boolean().default(true),
+  packageMode: z.enum(["fast", "high_quality"]).default("fast"),
 });
 const extendedVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,verification_metadata";
 const baseVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,verification_metadata";
@@ -195,6 +196,7 @@ packagesRouter.post("/generate", async (req, res) => {
       audioSourceMetadata: video.audio_source_metadata,
       presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
       includeClipPlan: body.includeClipPlan,
+      packageMode: body.packageMode,
     };
     const supabase = createServiceClient();
     if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });

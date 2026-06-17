@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { analyzeStage } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
-import { createNormalizedMaster, createNormalizedMasterWithAudio, exportStage, socialClipStage } from "./exportStage";
+import { createFastNormalizedMaster, createFastNormalizedMasterWithAudio, createNormalizedMaster, createNormalizedMasterWithAudio, exportStage, socialClipStage } from "./exportStage";
 import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
 import type { ExportArtifact, PackageJob, PackageManifest, PackageStatus, VideoRow } from "./packageTypes";
 
@@ -94,7 +94,7 @@ function stageProgressReporter(input: {
   return async (progress: { percent: number; seconds?: number; label?: string; current?: number; total?: number }) => {
     const nowMs = Date.now();
     const stagePercent = Math.min(100, Math.max(0, Math.round(progress.percent)));
-    const overallProgress = clampProgress(input.startProgress + ((input.endProgress - input.startProgress) * stagePercent) / 100);
+    const overallProgress = Math.max(lastProgress, clampProgress(input.startProgress + ((input.endProgress - input.startProgress) * stagePercent) / 100));
     if (overallProgress === lastProgress && nowMs - lastUpdateAt < (input.throttleMs ?? 4000)) return;
     if (nowMs - lastUpdateAt < (input.throttleMs ?? 4000) && stagePercent < 100) return;
     lastUpdateAt = nowMs;
@@ -114,6 +114,16 @@ function stageProgressReporter(input: {
       },
     });
   };
+}
+
+function packageMode(job: PackageJob) {
+  return job.input?.packageMode === "high_quality" ? "high_quality" : "fast";
+}
+
+function canCopyVideoForFastMaster(video: VideoRow, job: PackageJob) {
+  const sourceFormat = String((job.input?.sourceFormat as string | undefined) ?? video.source_format ?? "").toLowerCase();
+  const codec = String((job.input?.videoCodec as string | undefined) ?? video.video_codec ?? "").toLowerCase();
+  return sourceFormat === "mp4" && ["h264", "avc1"].includes(codec);
 }
 
 async function heartbeat(client: WorkerClient, job: PackageJob, stage: string) {
@@ -503,6 +513,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
     const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
     const sourceDurationSeconds = typeof video.duration_seconds === "number" ? video.duration_seconds : undefined;
+    const mode = packageMode(job);
+    const useFastCopyMaster = mode === "fast" && canCopyVideoForFastMaster(video, job);
 
     const sourcePath = path.join(workdir, "source-input");
     const audioSourcePath = path.join(workdir, "audio-sidecar-input");
@@ -516,11 +528,15 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       if (audioSourceObjectKey) await downloadR2File(audioSourceObjectKey, audioSourcePath);
     });
 
-    await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey) });
+    await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey), packageMode: mode, fastCopyMaster: useFastCopyMaster });
     const reportNormalizeProgress = stageProgressReporter({ client, job, stage: "normalize_master", startProgress: 25, endProgress: 40 });
-    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey
-      ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress)
-      : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports, sourceDurationSeconds, reportNormalizeProgress));
+    await withHeartbeat(client, job, "normalize_master", () => {
+      if (useFastCopyMaster && audioSourceObjectKey) return createFastNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress);
+      if (useFastCopyMaster) return createFastNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports, sourceDurationSeconds, reportNormalizeProgress);
+      return audioSourceObjectKey
+        ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress)
+        : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports, sourceDurationSeconds, reportNormalizeProgress);
+    });
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
     const masterAsset: ExportArtifactWithPath = {
@@ -554,6 +570,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       packageJobId: job.id,
       hasAudio: hasAudioForExports,
       onProgress: reportClipProgress,
+      fastMode: mode === "fast",
+      clipRenderConcurrency: mode === "fast" ? Number(process.env.PACKAGE_FAST_CLIP_CONCURRENCY ?? 2) : 1,
     }));
 
     await markStage(client, job, "preset_exports", 70, { clipAssetCount: clipArtifacts.length });
@@ -590,6 +608,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       sourceObjectKey,
       audioSourceObjectKey: audioSourceObjectKey || null,
       generatedAt: new Date().toISOString(),
+      packageMode: mode,
       analysis: { durationSeconds: analysis.durationSeconds },
       normalizedMaster: { objectKey: masterObjectKey, fileName: "normalized-master.mp4" },
       clipPlan: analysis.clipPlan,
@@ -637,6 +656,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       exportCount: exportArtifacts.length,
       clipPlanCount: analysis.clipPlan.length,
       assetCount: validatedAssets.length + 1,
+      packageMode: mode,
       exports: exportArtifacts,
     };
     await updatePackageState(client, job.id, "completed", {

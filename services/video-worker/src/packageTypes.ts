@@ -80,6 +80,7 @@ export type PackageManifest = {
   sourceObjectKey: string;
   audioSourceObjectKey?: string | null;
   generatedAt: string;
+  packageMode?: "fast" | "high_quality";
   analysis: Pick<AnalysisResult, "durationSeconds">;
   normalizedMaster: {
     objectKey: string;

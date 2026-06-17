@@ -69,15 +69,15 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
   const packageComplete = latestPackage?.status === "completed";
   const packageFailed = latestPackage?.status === "failed";
 
-  async function producePackage() {
+  async function producePackage(packageMode: "fast" | "high_quality") {
     if (!token || !latestVideo?.id) return;
     setBusy(true);
     try {
       const response = await apiFetch<{ job_id: string }>("/packages/generate", {
         method: "POST",
-        body: JSON.stringify({ projectId, videoId: latestVideo.id }),
+        body: JSON.stringify({ projectId, videoId: latestVideo.id, packageMode }),
       }, token);
-      setMessage(`Package queued: ${response.job_id}`);
+      setMessage(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not queue package.");
     } finally {
@@ -136,8 +136,9 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
 
       <div className="card">
         <h3>Produce Package</h3>
-        <p className="muted">Creates vertical clips, landscape exports, thumbnails, captions/metadata, manifest, README, and ZIP. Package generation is async and safe for long videos.</p>
-        <button className="button" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage()}>{busy ? "Working..." : "Produce Package"}</button>
+        <p className="muted">Fast Package uses stream-copy where safe, three core social formats, and limited parallel rendering. High Quality Package uses the full render path.</p>
+        <button className="button" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage("fast")}>{busy ? "Working..." : "Produce Fast Package"}</button>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage("high_quality")}>High Quality Package</button>
         {!uploadVerified && <p className="warning">Button stays disabled until upload verification succeeds.</p>}
         {isAudioOnly && <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
         {uploadVerified && !isAudioOnly && !hasVideoStream && <p className="warning">Video stream metadata is missing. Re-upload or re-verify before producing a package.</p>}

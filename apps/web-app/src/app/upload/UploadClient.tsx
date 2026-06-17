@@ -8,6 +8,7 @@ import type { DashboardProject } from "../../lib/types";
 type CreatedProject = { project: { id: string; title: string; status: string } };
 type SignedUpload = { key: string; uploadUrl: string | null; expiresIn: number; expiresAt?: string; method?: "PUT"; mode: string };
 type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null } };
+type PackageMode = "fast" | "high_quality";
 type PackageJobResponse = { job_id: string; status: string };
 type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
@@ -318,17 +319,17 @@ export function UploadClient() {
     }
   }
 
-  async function producePackage() {
+  async function producePackage(packageMode: PackageMode) {
     if (!auth.session?.access_token || !uploadedVideo) return;
     setPackageBusy(true);
     setPackageStatus("");
     try {
       const response = await apiFetch<PackageJobResponse>("/packages/generate", {
         method: "POST",
-        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id }),
+        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode }),
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
-      setPackageStatus(`Package queued: ${response.job_id}. Processing has started.`);
+      setPackageStatus(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}. Processing has started.`);
       await refreshPackageJob(response.job_id).catch(() => undefined);
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
@@ -408,7 +409,8 @@ export function UploadClient() {
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
           {audioFile && <p className="status">Separate audio uploaded. The package worker will replace the video's original audio with this track before creating clips and exports.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
-          <button className="button" onClick={() => void producePackage()} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Package"}</button>
+          <button className="button" onClick={() => void producePackage("fast")} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Fast Package"}</button>
+          <button className="button secondary" onClick={() => void producePackage("high_quality")} disabled={packageBusy || uploadedVideo.has_video !== true}>High Quality Package</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
           {packageStatus && <p className={isPackageWarning(packageStatus) ? "warning" : "muted"}>{packageStatus}</p>}
         </div>}
