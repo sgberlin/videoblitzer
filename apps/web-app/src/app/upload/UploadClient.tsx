@@ -17,16 +17,23 @@ type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
 
 const packageStages = [
-  { key: "queued", label: "Queued" },
-  { key: "download_source", label: "Downloading source media" },
-  { key: "normalize_master", label: "Merging and normalizing media" },
-  { key: "analyze", label: "Detecting highlights" },
-  { key: "rendering_clips", label: "Creating social clips" },
-  { key: "preset_exports", label: "Creating export presets" },
-  { key: "validating_assets", label: "Validating generated assets" },
-  { key: "building_zip", label: "Building ZIP package" },
-  { key: "completed", label: "Complete" },
+  { key: "queued", label: "Queued", start: 0, end: 15 },
+  { key: "download_source", label: "Downloading source media", start: 15, end: 25 },
+  { key: "normalize_master", label: "Merging and normalizing media", start: 25, end: 40 },
+  { key: "analyze", label: "Detecting highlights", start: 40, end: 55 },
+  { key: "rendering_clips", label: "Creating social clips", start: 55, end: 70 },
+  { key: "preset_exports", label: "Creating export presets", start: 70, end: 82 },
+  { key: "validating_assets", label: "Validating generated assets", start: 82, end: 90 },
+  { key: "building_zip", label: "Building ZIP package", start: 90, end: 100 },
+  { key: "completed", label: "Complete", start: 100, end: 100 },
 ];
+
+const slowStageNotes: Record<string, string> = {
+  normalize_master: "This is usually the slowest first step because FFmpeg is rebuilding the full master video and replacing/normalizing audio.",
+  rendering_clips: "This can take time because each social clip is rendered into multiple platform sizes.",
+  preset_exports: "This can take time because full export presets are being encoded.",
+  building_zip: "Large packages take longer while files are collected and compressed.",
+};
 
 function contentTypeForVideo(file: File) {
   if (file.type) return file.type;
@@ -64,6 +71,24 @@ function formatEta(seconds: number | null) {
   return `${minutes}m ${remainder}s`;
 }
 
+function stagePercent(stage: typeof packageStages[number], totalProgress: number) {
+  if (totalProgress >= stage.end) return 100;
+  if (totalProgress <= stage.start) return stage.key === "queued" && totalProgress > 0 ? 100 : 0;
+  const width = Math.max(1, stage.end - stage.start);
+  return Math.min(99, Math.max(1, Math.round(((totalProgress - stage.start) / width) * 100)));
+}
+
+function formatStageElapsed(value: unknown) {
+  if (typeof value !== "string") return "";
+  const startedAt = new Date(value).getTime();
+  if (!Number.isFinite(startedAt)) return "";
+  const elapsedSeconds = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
 function friendlyPackageError(error: unknown) {
   const message = error instanceof Error ? error.message : "Could not produce package.";
   if (message.toLowerCase() === "failed to fetch") return "Could not contact the API. Check deployment/network status, then try Produce Package again.";
@@ -80,9 +105,12 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   const progress = Math.min(100, Math.max(0, Number(job?.progress ?? 0)));
   const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));
   const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";
+  const elapsed = formatStageElapsed(job?.output?.stageUpdatedAt);
+  const note = slowStageNotes[stage];
   return <div className="card">
     <h3>Package Progress</h3>
-    <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%</p>
+    <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%{elapsed ? ` · running ${elapsed}` : ""}</p>
+    {note && job?.status === "processing" && <p className="muted">{note}</p>}
     <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}>
       <div style={{ width: `${progress}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} />
     </div>
@@ -90,7 +118,8 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
       {packageStages.map((item, index) => {
         const reached = Boolean(job) && index <= activeIndex;
         const current = Boolean(job) && index === activeIndex && job?.status !== "completed";
-        return <p key={item.key} className={reached ? "status" : "muted"}>{reached ? "[x]" : "[ ]"} {current ? "Now: " : ""}{item.label}</p>;
+        const itemProgress = job?.status === "completed" ? 100 : stagePercent(item, progress);
+        return <p key={item.key} className={reached ? "status" : "muted"}>{reached ? "[x]" : "[ ]"} {current ? "Now: " : ""}{item.label} · {itemProgress}%</p>;
       })}
     </div>
     {job?.error_message && <p className="warning">{job.error_message}</p>}
