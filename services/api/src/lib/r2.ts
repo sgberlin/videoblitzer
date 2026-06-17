@@ -1,5 +1,6 @@
 import { GetObjectCommand, HeadObjectCommand, ListObjectsV2Command, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { createHash } from "node:crypto";
 import { config } from "../config";
 
 export interface R2UsageSummary {
@@ -65,6 +66,16 @@ export async function verifyR2Object(objectKey: string) {
   } catch {
     return { exists: false, sizeBytes: null, contentType: null };
   }
+}
+
+export async function sha256R2Object(objectKey: string) {
+  const client = createR2Client();
+  if (!client) throw new Error("R2 object hashing is not configured on the API server.");
+  const response = await client.send(new GetObjectCommand({ Bucket: config.R2_BUCKET_NAME, Key: objectKey }));
+  const body = response.Body as { transformToByteArray?: () => Promise<Uint8Array> } | undefined;
+  if (!body?.transformToByteArray) throw new Error("R2 object body could not be read for hashing.");
+  const bytes = await body.transformToByteArray();
+  return createHash("sha256").update(bytes).digest("hex");
 }
 
 export async function readR2Usage(prefix?: string): Promise<R2UsageSummary> {

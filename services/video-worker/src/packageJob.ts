@@ -120,6 +120,21 @@ function packageMode(job: PackageJob) {
   return job.input?.packageMode === "high_quality" ? "high_quality" : "fast";
 }
 
+function packageVariant(job: PackageJob) {
+  return String(job.package_variant ?? job.input?.packageVariant ?? "standard_highlights");
+}
+
+function packageOptions(job: PackageJob) {
+  const options = job.package_options ?? job.input?.packageOptions;
+  return typeof options === "object" && options !== null ? options as Record<string, unknown> : {};
+}
+
+function isSchemaCacheMissingColumn(error: unknown) {
+  const message = typeof (error as { message?: unknown })?.message === "string" ? (error as { message: string }).message : String(error);
+  const code = typeof (error as { code?: unknown })?.code === "string" ? (error as { code: string }).code : "";
+  return code === "42703" || code === "PGRST204" || (message.includes("Could not find") && message.includes("schema cache"));
+}
+
 function canCopyVideoForFastMaster(video: VideoRow, job: PackageJob) {
   const sourceFormat = String((job.input?.sourceFormat as string | undefined) ?? video.source_format ?? "").toLowerCase();
   const codec = String((job.input?.videoCodec as string | undefined) ?? video.video_codec ?? "").toLowerCase();
@@ -262,7 +277,7 @@ async function claimQueuedPackageJob(client: WorkerClient) {
 async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
   const { data, error } = await client
     .from("videos")
-    .select("id,project_id,storage_key,source_object_key,source_format,markers,verification_metadata")
+    .select("id,project_id,storage_key,source_object_key,source_format,markers,file_sha256,duplicate_of_video_id,analysis_status,analysis_metadata,verification_metadata")
     .eq("id", job.video_id)
     .eq("owner_id", job.user_id)
     .maybeSingle();
@@ -277,9 +292,106 @@ async function fetchPackageVideo(client: WorkerClient, job: PackageJob) {
     has_video: job.input?.hasVideo ?? media.has_video ?? false,
     has_audio: job.input?.hasAudio ?? (hasAudioSource ? true : media.has_audio ?? false),
     duration_seconds: job.input?.durationSeconds ?? media.duration_seconds ?? null,
+    file_sha256: job.input?.fileSha256 ?? data.file_sha256 ?? verification.fileSha256 ?? null,
+    duplicate_of_video_id: job.input?.duplicateSourceVideoId ?? data.duplicate_of_video_id ?? verification.duplicateOfVideoId ?? null,
     audio_source_object_key: job.input?.audioSourceObjectKey ?? audioSource.objectKey ?? null,
     audio_source_metadata: (job.input?.audioSourceMetadata as Record<string, unknown> | undefined) ?? (hasAudioSource ? audioSource : {}),
   } as VideoRow;
+}
+
+function clipPlanFromAnalysisRow(row: Record<string, unknown>): PackageManifest["clipPlan"] {
+  const candidateMoments = Array.isArray(row.candidate_moments) ? row.candidate_moments : [];
+  return candidateMoments
+    .map((candidate, index) => {
+      const item = candidate as Record<string, unknown>;
+      const startSeconds = Number(item.startSeconds ?? item.start_seconds ?? 0);
+      const endSeconds = Number(item.endSeconds ?? item.end_seconds ?? startSeconds + 30);
+      return {
+        id: String(item.id ?? `reused-${index + 1}`),
+        startSeconds,
+        endSeconds,
+        label: String(item.label ?? `Reused highlight ${index + 1}`),
+        note: typeof item.note === "string" ? item.note : undefined,
+        confidence: Number(item.confidence ?? 0.5),
+        reason: String(item.reason ?? "Reused saved analysis from a previous upload."),
+        suggestedClipType: (["quick_moment", "short_highlight", "story_highlight", "extended_highlight"].includes(String(item.suggestedClipType)) ? item.suggestedClipType : "short_highlight") as PackageManifest["clipPlan"][number]["suggestedClipType"],
+        platformFit: Array.isArray(item.platformFit) ? item.platformFit.map(String) : ["instagram_reels", "tiktok", "youtube_shorts"],
+      };
+    })
+    .filter((item) => Number.isFinite(item.startSeconds) && Number.isFinite(item.endSeconds) && item.endSeconds > item.startSeconds);
+}
+
+async function loadReusableAnalysis(client: WorkerClient, job: PackageJob, video: VideoRow) {
+  const analysisId = String(job.analysis_id ?? job.input?.analysisId ?? "");
+  if (analysisId) {
+    const { data, error } = await client.from("video_analysis").select("*").eq("id", analysisId).eq("user_id", job.user_id).eq("status", "completed").maybeSingle();
+    if (error) {
+      if (isSchemaCacheMissingColumn(error)) return null;
+      throw new Error(error.message);
+    }
+    if (data) return data as Record<string, unknown>;
+  }
+  const sourceHash = String(job.input?.fileSha256 ?? video.file_sha256 ?? "");
+  if (!sourceHash) return null;
+  const { data, error } = await client.from("video_analysis").select("*").eq("user_id", job.user_id).eq("source_hash", sourceHash).eq("status", "completed").order("created_at", { ascending: false }).limit(1).maybeSingle();
+  if (error) {
+    if (isSchemaCacheMissingColumn(error)) return null;
+    throw new Error(error.message);
+  }
+  return (data as Record<string, unknown> | null) ?? null;
+}
+
+async function persistVideoAnalysis(client: WorkerClient, job: PackageJob, video: VideoRow, analysis: PackageManifest["analysis"] & { clipPlan: PackageManifest["clipPlan"] }) {
+  const sourceHash = String(job.input?.fileSha256 ?? video.file_sha256 ?? "");
+  if (!sourceHash) return null;
+  const analysisId = randomUUID();
+  const { error } = await client.from("video_analysis").insert({
+    id: analysisId,
+    video_id: video.duplicate_of_video_id ?? video.id,
+    user_id: job.user_id,
+    project_id: job.project_id,
+    source_hash: sourceHash,
+    status: "completed",
+    duration_seconds: analysis.durationSeconds,
+    scene_changes: [],
+    audio_peaks: [],
+    motion_scores: [],
+    candidate_moments: analysis.clipPlan,
+    transcript_metadata: {},
+  });
+  if (error) {
+    if (isSchemaCacheMissingColumn(error)) return null;
+    throw new Error(error.message);
+  }
+  await Promise.all([
+    client.from("package_jobs").update({ analysis_id: analysisId, reuse_analysis: false }).eq("id", job.id),
+    client.from("videos").update({ analysis_status: "completed", analysis_metadata: { analysisId, candidateMomentCount: analysis.clipPlan.length, sourceHash } }).eq("id", video.duplicate_of_video_id ?? video.id).eq("owner_id", job.user_id),
+  ]);
+  return analysisId;
+}
+
+function varyClipPlanForPackage(clipPlan: PackageManifest["clipPlan"], job: PackageJob) {
+  const variant = packageVariant(job);
+  const options = packageOptions(job);
+  const requestedCount = typeof options.numberOfClips === "number" ? Math.min(30, Math.max(1, Math.round(options.numberOfClips))) : undefined;
+  const focusType = typeof options.focusType === "string" ? options.focusType.replaceAll("_", " ") : "";
+  const sorted = [...clipPlan].sort((a, b) => {
+    if (variant === "high_energy" || variant === "tiktok_first" || variant === "instagram_reels" || variant === "youtube_shorts") return b.confidence - a.confidence || (a.endSeconds - a.startSeconds) - (b.endSeconds - b.startSeconds);
+    if (variant === "coach_review" || variant === "defensive_plays") return (b.endSeconds - b.startSeconds) - (a.endSeconds - a.startSeconds);
+    return a.startSeconds - b.startSeconds;
+  });
+  const limit = requestedCount ?? (variant === "high_energy" || variant === "tiktok_first" ? 6 : sorted.length);
+  return sorted.slice(0, limit).map((clip, index) => ({
+    ...clip,
+    id: `${clip.id}-${variant}-${index + 1}`,
+    reason: [
+      Boolean(job.input?.reuseAnalysis ?? job.reuse_analysis) ? "Reused saved analysis." : "Fresh analysis.",
+      variant === "custom" ? "User custom focus." : variant === "standard_highlights" ? "Standard highlight selection." : "Alternative pacing and style.",
+      variant.includes("tiktok") || variant.includes("instagram") || variant.includes("youtube") ? "Platform-specific selection." : "",
+      focusType ? `Focus: ${focusType}.` : "",
+      clip.reason,
+    ].filter(Boolean).join(" "),
+  }));
 }
 
 async function cleanupPreviousPackageRows(client: WorkerClient, job: PackageJob) {
@@ -471,9 +583,12 @@ async function persistSocialPackage(client: WorkerClient, job: PackageJob, conte
 }
 
 function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["clipPlan"], exports: ExportArtifact[]) {
+  const variant = packageVariant(job);
   return {
     packageJobId: job.id,
     source: "package_worker",
+    packageVariant: variant,
+    packageOptions: packageOptions(job),
     titleVariants: ["VideoBlitzer Match Package", "Highlights Package"],
     chapters: clipPlan.map((clip) => ({
       startSeconds: clip.startSeconds,
@@ -491,7 +606,7 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
       facebookReels: "9:16, captions recommended.",
       xTwitter: "Short caption text and clipped MP4 assets.",
     },
-    packageSummary: `Generated ${exports.length} preset exports and ${clipPlan.length} planned clips.`,
+    packageSummary: `Generated ${exports.length} preset exports and ${clipPlan.length} planned clips for ${variant.replaceAll("_", " ")}.`,
     complianceNote: "Generated from project-owned media and factual timeline markers.",
   };
 }
@@ -514,6 +629,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
     const sourceDurationSeconds = typeof video.duration_seconds === "number" ? video.duration_seconds : undefined;
     const mode = packageMode(job);
+    const variant = packageVariant(job);
+    const options = packageOptions(job);
     const useFastCopyMaster = mode === "fast" && canCopyVideoForFastMaster(video, job);
 
     const sourcePath = path.join(workdir, "source-input");
@@ -555,8 +672,21 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       metadata: { folder: "master" },
     };
 
-    await markStage(client, job, "analyze", 40);
-    const analysis = await withHeartbeat(client, job, "analyze", () => analyzeStage(normalizedMasterPath, video.markers ?? []));
+    await markStage(client, job, "analyze", 40, { reuseAnalysis: Boolean(job.input?.reuseAnalysis ?? job.reuse_analysis), packageVariant: variant });
+    const reusableAnalysis = Boolean(job.input?.reuseAnalysis ?? job.reuse_analysis) ? await loadReusableAnalysis(client, job, video) : null;
+    const reusableClipPlan = reusableAnalysis ? clipPlanFromAnalysisRow(reusableAnalysis) : [];
+    const canUseReusableAnalysis = Boolean(reusableAnalysis && reusableClipPlan.length);
+    const rawAnalysis = canUseReusableAnalysis
+      ? {
+        durationSeconds: Number(reusableAnalysis!.duration_seconds ?? sourceDurationSeconds ?? 0),
+        clipPlan: reusableClipPlan,
+      }
+      : await withHeartbeat(client, job, "analyze", () => analyzeStage(normalizedMasterPath, video.markers ?? []));
+    const analysis = {
+      durationSeconds: rawAnalysis.durationSeconds,
+      clipPlan: varyClipPlanForPackage(rawAnalysis.clipPlan, job),
+    };
+    const analysisId = canUseReusableAnalysis && reusableAnalysis?.id ? String(reusableAnalysis.id) : await persistVideoAnalysis(client, job, video, analysis);
     await persistClipPlan(client, job, analysis.clipPlan);
 
     await markStage(client, job, "rendering_clips", 55, { clipPlanCount: analysis.clipPlan.length });
@@ -609,6 +739,10 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       audioSourceObjectKey: audioSourceObjectKey || null,
       generatedAt: new Date().toISOString(),
       packageMode: mode,
+      packageVariant: variant,
+      analysisId,
+      reuseAnalysis: canUseReusableAnalysis,
+      packageOptions: options,
       analysis: { durationSeconds: analysis.durationSeconds },
       normalizedMaster: { objectKey: masterObjectKey, fileName: "normalized-master.mp4" },
       clipPlan: analysis.clipPlan,
@@ -657,6 +791,10 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       clipPlanCount: analysis.clipPlan.length,
       assetCount: validatedAssets.length + 1,
       packageMode: mode,
+      packageVariant: variant,
+      packageOptions: options,
+      analysisId,
+      reuseAnalysis: canUseReusableAnalysis,
       exports: exportArtifacts,
     };
     await updatePackageState(client, job.id, "completed", {

@@ -7,8 +7,19 @@ import type { DashboardProject } from "../../lib/types";
 
 type CreatedProject = { project: { id: string; title: string; status: string } };
 type SignedUpload = { key: string; uploadUrl: string | null; expiresIn: number; expiresAt?: string; method?: "PUT"; mode: string };
-type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null } };
+type ExistingPackageJob = { id?: string; status?: string; package_variant?: string; artifact_object_key?: string | null; created_at?: string; completed_at?: string; input?: Record<string, unknown> };
+type DuplicateSummary = {
+  originalVideo?: Record<string, unknown>;
+  originalProject?: { id?: string; title?: string; created_at?: string } | null;
+  packageCount: number;
+  completedPackageCount: number;
+  availablePackageTypes: string[];
+  lastPackageCreatedAt: string | null;
+  packageJobs?: ExistingPackageJob[];
+};
+type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null; duplicate_of_video_id?: string | null }; duplicate?: DuplicateSummary | null };
 type PackageMode = "fast" | "high_quality";
+type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "player_highlight" | "tiktok_first" | "instagram_reels" | "youtube_shorts" | "defensive_plays" | "offensive_plays" | "custom";
 type PackageJobResponse = { job_id: string; status: string };
 type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
@@ -140,6 +151,37 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   </div>;
 }
 
+function DuplicateDetectedPanel({
+  duplicate,
+  onReuse,
+  onAlternative,
+  onCustom,
+  busy,
+}: {
+  duplicate: DuplicateSummary;
+  onReuse: () => void;
+  onAlternative: (variant: PackageVariant) => void;
+  onCustom: () => void;
+  busy: boolean;
+}) {
+  const completedJob = duplicate.packageJobs?.find((job) => job.status === "completed" && job.artifact_object_key);
+  const originalProjectId = duplicate.originalProject?.id;
+  return <div className="card">
+    <h3>Duplicate Detected</h3>
+    <p className="status">This video appears to match a previous upload.</p>
+    <p className="muted">This video was already uploaded{duplicate.originalProject?.created_at ? ` on ${new Date(duplicate.originalProject.created_at).toLocaleDateString()}` : ""}. You can reuse the existing package or create a new version with a different style.</p>
+    <p><strong>Original project:</strong> {duplicate.originalProject?.title ?? "Previous project"}</p>
+    <p className="muted">Packages: {duplicate.packageCount} total · {duplicate.completedPackageCount} completed · Last package: {duplicate.lastPackageCreatedAt ? new Date(duplicate.lastPackageCreatedAt).toLocaleString() : "none yet"}</p>
+    <p className="muted">Available package types: {duplicate.availablePackageTypes.length ? duplicate.availablePackageTypes.map((item) => item.replaceAll("_", " ")).join(", ") : "none yet"}</p>
+    <p className="muted">Alternative packages reuse the existing analysis, so they process faster.</p>
+    <button className="button" disabled={busy || !completedJob?.id} onClick={onReuse}>Reuse Existing Package</button>
+    <button className="button secondary" disabled={busy} onClick={() => onAlternative("high_energy")}>Create Alternative Package</button>
+    <button className="button secondary" disabled={busy} onClick={onCustom}>Create Custom Package</button>
+    {originalProjectId && <a className="button secondary" href={`/projects/${originalProjectId}/social-production`}>Open Original Project</a>}
+    {!completedJob?.id && <p className="warning">No completed package exists yet, but you can create an alternative or custom package from the saved analysis when available.</p>}
+  </div>;
+}
+
 function uploadToSignedUrl(file: File, signed: SignedUpload, contentType: string, onProgress: (value: UploadProgress) => void) {
   return new Promise<void>((resolve, reject) => {
     if (!signed.uploadUrl) {
@@ -183,6 +225,7 @@ export function UploadClient() {
   const [status, setStatus] = useState("Choose a video file to start.");
   const [projectUrl, setProjectUrl] = useState("");
   const [uploadedVideo, setUploadedVideo] = useState<UploadedVideoState | null>(null);
+  const [duplicate, setDuplicate] = useState<DuplicateSummary | null>(null);
   const [packageJob, setPackageJob] = useState<PackageJob | null>(null);
   const [packageStatus, setPackageStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -242,6 +285,7 @@ export function UploadClient() {
     setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: audioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: audioFile ? "preparing" : "idle" });
     setProjectUrl("");
     setUploadedVideo(null);
+    setDuplicate(null);
     setPackageJob(null);
     setPackageStatus("");
 
@@ -308,7 +352,8 @@ export function UploadClient() {
       setProgress((current) => ({ ...current, state: "complete" }));
       if (audioFile) setAudioProgress((current) => ({ ...current, state: "complete" }));
       setUploadedVideo(completed.video);
-      setStatus(completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
+      setDuplicate(completed.duplicate ?? null);
+      setStatus(completed.duplicate ? "This video appears to match a previous upload." : completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
       setProjectUrl(`/projects/${created.project.id}/social-production`);
     } catch (error) {
       setProgress((current) => ({ ...current, state: "failed" }));
@@ -331,6 +376,77 @@ export function UploadClient() {
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}. Processing has started.`);
       await refreshPackageJob(response.job_id).catch(() => undefined);
+    } catch (error) {
+      setPackageStatus(friendlyPackageError(error));
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
+  async function reuseExistingPackage() {
+    if (!auth.session?.access_token || !duplicate) return;
+    const completedJob = duplicate.packageJobs?.find((job) => job.status === "completed" && job.artifact_object_key);
+    if (!completedJob?.id) {
+      setPackageStatus("No completed package is available to reuse yet.");
+      return;
+    }
+    setPackageBusy(true);
+    try {
+      const response = await apiFetch<{ downloadUrl?: string | null; packageJob?: PackageJob }>(`/packages/${completedJob.id}/reuse`, { method: "POST" }, auth.session.access_token);
+      if (response.packageJob) setPackageJob(response.packageJob);
+      if (response.downloadUrl) window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
+      setPackageStatus("Reused existing package. No package credits charged.");
+    } catch (error) {
+      setPackageStatus(friendlyPackageError(error));
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
+  async function createAlternativePackage(variant: PackageVariant) {
+    if (!auth.session?.access_token || !uploadedVideo) return;
+    setPackageBusy(true);
+    try {
+      const response = await apiFetch<PackageJobResponse>("/packages/generate-alternative", {
+        method: "POST",
+        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode: "fast", packageVariant: variant }),
+      }, auth.session.access_token);
+      setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
+      setPackageStatus(`Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.`);
+    } catch (error) {
+      setPackageStatus(friendlyPackageError(error));
+    } finally {
+      setPackageBusy(false);
+    }
+  }
+
+  async function createCustomPackage() {
+    if (!auth.session?.access_token || !uploadedVideo) return;
+    const targetPlatform = window.prompt("Target platform (TikTok, Instagram Reels, YouTube Shorts, YouTube, Facebook)", "TikTok") ?? "";
+    if (!targetPlatform.trim()) return;
+    const numberOfClips = Number(window.prompt("Number of clips", "6") ?? "6");
+    const includeCaptions = window.confirm("Include captions?");
+    setPackageBusy(true);
+    try {
+      const response = await apiFetch<PackageJobResponse>("/packages/generate-custom", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId: uploadedVideo.project_id,
+          videoId: uploadedVideo.id,
+          packageMode: "fast",
+          packageOptions: {
+            targetPlatform,
+            tonePreset: "high_energy",
+            clipDurationPreference: "short",
+            numberOfClips: Number.isFinite(numberOfClips) ? numberOfClips : 6,
+            includeCaptions,
+            outputs: ["vertical", "landscape", "square"],
+            focusType: "big_plays",
+          },
+        }),
+      }, auth.session.access_token);
+      setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
+      setPackageStatus(`Custom package queued: ${response.job_id}. It will reuse saved analysis when available.`);
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
     } finally {
@@ -401,7 +517,8 @@ export function UploadClient() {
           </>}
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
-        {uploadedVideo && <div className="card">
+        {uploadedVideo && duplicate && <DuplicateDetectedPanel duplicate={duplicate} busy={packageBusy} onReuse={() => void reuseExistingPackage()} onAlternative={(variant) => void createAlternativePackage(variant)} onCustom={() => void createCustomPackage()} />}
+        {uploadedVideo && !duplicate && <div className="card">
           <h3>Produce Package</h3>
           {uploadedVideo.has_video === true
             ? <p className="status">Upload verified. Ready to produce package.</p>

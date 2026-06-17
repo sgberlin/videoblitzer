@@ -11,9 +11,11 @@ import type { ProjectDetail } from "../../../lib/types";
 type WorkspaceTab = "overview" | "social-production" | "imports" | "timeline" | "match-data" | "highlights" | "captions" | "commentary" | "thumbnail" | "social-pack" | "exports" | "debug";
 type ConversionJob = { id?: string; status?: string; source_object_key?: string; target_object_key?: string; error_message?: string; created_at?: string };
 type ImportJob = { id?: string; status?: string; progress?: number; source_url?: string; source_type?: string; error_message?: string; r2_object_key?: string; created_at?: string };
-type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string; output?: Record<string, unknown>; manifest_json?: Record<string, unknown>; created_at?: string };
+type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string; package_variant?: string; input?: Record<string, unknown>; output?: Record<string, unknown>; manifest_json?: Record<string, unknown>; created_at?: string };
 type PackageAsset = { id?: string; package_job_id?: string; asset_type?: string; platform?: string; filename?: string; storage_key?: string; duration_seconds?: number; width?: number; height?: number; aspect_ratio?: string; validation_status?: string; confidence?: number; metadata?: Record<string, unknown> };
 type UploadVerification = { id?: string; video_id?: string; object_key?: string; status?: string; verified_size_bytes?: number; verified_content_type?: string; verified_at?: string; error_message?: string };
+type VideoRecord = Record<string, unknown> & { id?: string; duplicate_of_video_id?: string | null; analysis_status?: string | null; analysis_metadata?: Record<string, unknown> | null; file_sha256?: string | null };
+type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "player_highlight" | "tiktok_first" | "instagram_reels" | "youtube_shorts" | "defensive_plays" | "offensive_plays";
 
 function JsonCard({ title, value }: { title: string; value: unknown }) {
   return <div className="card"><h3>{title}</h3><pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(value, null, 2)}</pre></div>;
@@ -55,7 +57,7 @@ function PackageTimeline({ job }: { job?: PackageJob }) {
 function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDetail; projectId: string; token?: string }) {
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
-  const videos = data.videos;
+  const videos = data.videos as VideoRecord[];
   const latestVideo = videos[0];
   const packageJobs = (data.packageJobs ?? []) as PackageJob[];
   const latestPackage = packageJobs[0];
@@ -85,6 +87,54 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     }
   }
 
+  async function generateVariant(packageVariant: PackageVariant) {
+    if (!token || !latestVideo?.id) return;
+    setBusy(true);
+    try {
+      const response = await apiFetch<{ job_id: string }>("/packages/generate-alternative", {
+        method: "POST",
+        body: JSON.stringify({ projectId, videoId: latestVideo.id, packageMode: "fast", packageVariant }),
+      }, token);
+      setMessage(`New ${packageVariant.replaceAll("_", " ")} package queued: ${response.job_id}. It will reuse saved analysis when available.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not queue package variant.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function generateCustom() {
+    if (!token || !latestVideo?.id) return;
+    const targetPlatform = window.prompt("Target platform", "TikTok") ?? "";
+    if (!targetPlatform.trim()) return;
+    const numberOfClips = Number(window.prompt("Number of clips", "6") ?? "6");
+    setBusy(true);
+    try {
+      const response = await apiFetch<{ job_id: string }>("/packages/generate-custom", {
+        method: "POST",
+        body: JSON.stringify({
+          projectId,
+          videoId: latestVideo.id,
+          packageMode: "fast",
+          packageOptions: {
+            targetPlatform,
+            tonePreset: "high_energy",
+            clipDurationPreference: "short",
+            numberOfClips: Number.isFinite(numberOfClips) ? numberOfClips : 6,
+            includeCaptions: window.confirm("Include captions?"),
+            outputs: ["vertical", "landscape", "square"],
+            focusType: "big_plays",
+          },
+        }),
+      }, token);
+      setMessage(`Custom package queued: ${response.job_id}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not queue custom package.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function retryPackage() {
     if (!token || !latestPackage?.id) return;
     setBusy(true);
@@ -105,6 +155,18 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
       if (!response.downloadUrl) throw new Error("Signed download is not available yet.");
       window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
       setMessage("Opened package ZIP download.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not open package ZIP.");
+    }
+  }
+
+  async function downloadPackageById(packageJobId?: string) {
+    if (!token || !packageJobId) return;
+    try {
+      const response = await apiFetch<{ downloadUrl: string | null }>(`/packages/${packageJobId}/download`, {}, token);
+      if (!response.downloadUrl) throw new Error("Signed download is not available yet.");
+      window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
+      setMessage("Opened previous package ZIP download.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not open package ZIP.");
     }
@@ -149,6 +211,40 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     </div>
 
     <PackageTimeline job={latestPackage} />
+
+    <div className="grid grid-2">
+      <div className="card">
+        <h3>Analysis Master</h3>
+        {latestVideo ? <>
+          <p className={latestVideo.analysis_status === "completed" || latestVideo.analysis_status === "reusable" ? "status" : "muted"}>Analysis status: {String(latestVideo.analysis_status ?? "not started")}</p>
+          {latestVideo.duplicate_of_video_id && <p className="status">This video matches a previous upload. Alternative packages can reuse the original analysis.</p>}
+          {latestVideo.file_sha256 && <p className="muted">Identity: SHA-256 stored · size/duration verified.</p>}
+          <p className="muted">Flow: upload once, verify once, analyze once, then generate many package versions from saved candidate moments.</p>
+        </> : <EmptyState label="analysis master" />}
+      </div>
+
+      <div className="card">
+        <h3>Generate New Variant</h3>
+        <p className="muted">Alternative packages reuse existing analysis when available, so they process faster than a full first-time package.</p>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("high_energy")}>High Energy</button>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("tiktok_first")}>TikTok First</button>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("coach_review")}>Coach Review</button>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateCustom()}>Custom Package</button>
+      </div>
+    </div>
+
+    <div className="card">
+      <h3>Existing Packages</h3>
+      {packageJobs.length ? <div className="grid grid-2">{packageJobs.slice(0, 12).map((job) => {
+        const variant = String(job.package_variant ?? job.input?.packageVariant ?? "standard_highlights");
+        return <div className="card" key={job.id}>
+          <strong>{variant.replaceAll("_", " ")}</strong>
+          <p className={job.status === "completed" ? "status" : job.status === "failed" ? "warning" : "muted"}>{job.status ?? "queued"} · {job.progress ?? 0}%</p>
+          {job.created_at && <p className="muted">Created {new Date(job.created_at).toLocaleString()}</p>}
+          {job.status === "completed" && job.id && <button className="button secondary" onClick={() => void downloadPackageById(job.id)}>Download Previous ZIP</button>}
+        </div>;
+      })}</div> : <EmptyState label="existing package" />}
+    </div>
 
     <div className="card">
       <h3>Detected Clips and Assets</h3>

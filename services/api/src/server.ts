@@ -20,6 +20,7 @@ import { projectsRouter } from "./routes/projects";
 import { storageRouter } from "./routes/storage";
 import { sourceImportRouter } from "./routes/sourceImport";
 import { uploadsRouter } from "./routes/uploads";
+import { videosRouter } from "./routes/videos";
 
 const app = express();
 app.use(helmet());
@@ -45,6 +46,7 @@ app.use("/dashboard", dashboardRouter);
 app.use("/downloads", downloadsRouter);
 app.use("/projects", projectsRouter);
 app.use("/uploads", uploadsRouter);
+app.use("/videos", videosRouter);
 app.use("/jobs", jobsRouter);
 app.use("/packages", packagesRouter);
 app.use("/exports", exportsRouter);

@@ -9,6 +9,12 @@ export type PackageJob = {
   user_id: string;
   status: string;
   attempts?: number | null;
+  analysis_id?: string | null;
+  package_variant?: string | null;
+  package_options?: Record<string, unknown> | null;
+  reuse_analysis?: boolean | null;
+  source_video_id?: string | null;
+  duplicate_source_video_id?: string | null;
   input?: Record<string, unknown> | null;
 };
 
@@ -31,6 +37,10 @@ export type VideoRow = {
   audio_source_size_bytes?: number | null;
   audio_source_metadata?: Record<string, unknown> | null;
   verification_metadata?: Record<string, unknown> | null;
+  file_sha256?: string | null;
+  duplicate_of_video_id?: string | null;
+  analysis_status?: string | null;
+  analysis_metadata?: Record<string, unknown> | null;
   markers: Array<{ seconds?: number; label?: string; note?: string; createdAt?: string }>;
 };
 
@@ -81,6 +91,10 @@ export type PackageManifest = {
   audioSourceObjectKey?: string | null;
   generatedAt: string;
   packageMode?: "fast" | "high_quality";
+  packageVariant?: string;
+  analysisId?: string | null;
+  reuseAnalysis?: boolean;
+  packageOptions?: Record<string, unknown>;
   analysis: Pick<AnalysisResult, "durationSeconds">;
   normalizedMaster: {
     objectKey: string;

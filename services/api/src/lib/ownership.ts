@@ -1,6 +1,6 @@
 import { createServiceClient } from "../supabase";
 
-const extendedVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,verification_metadata";
+const extendedVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,file_sha256,fingerprint_status,fingerprint_metadata,duplicate_of_video_id,analysis_status,analysis_metadata,has_video,has_audio,video_codec,audio_codec,duration_seconds,width,height,audio_source_object_key,audio_source_filename,audio_source_content_type,audio_source_size_bytes,audio_source_metadata,verification_metadata";
 const baseVideoSelect = "id,project_id,owner_id,storage_key,source_object_key,source_format,content_type,mime_type,verification_status,verified_at,verified_size_bytes,verification_metadata";
 
 export function isSchemaCacheMissingColumn(error: unknown) {
@@ -27,6 +27,10 @@ export function hydrateVideoMetadata<T extends Record<string, unknown> | null>(r
     height: row.height ?? media.height ?? null,
     audio_source_object_key: row.audio_source_object_key ?? audioSource.objectKey ?? null,
     audio_source_metadata: row.audio_source_metadata ?? (hasAudioSource ? audioSource : {}),
+    file_sha256: row.file_sha256 ?? verification.fileSha256 ?? null,
+    duplicate_of_video_id: row.duplicate_of_video_id ?? verification.duplicateOfVideoId ?? null,
+    analysis_status: row.analysis_status ?? null,
+    analysis_metadata: row.analysis_metadata ?? {},
   };
 }
 
