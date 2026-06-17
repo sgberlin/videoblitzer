@@ -12,6 +12,7 @@ import { probeR2MediaObject } from "../lib/mediaProbe";
 
 const allowedTypes = ["video/mp4", "video/quicktime", "video/x-matroska", "video/webm"] as const;
 const allowedAudioTypes = ["audio/mpeg", "audio/mp4", "audio/aac", "audio/wav", "audio/x-wav", "audio/webm", "audio/ogg", "audio/flac"] as const;
+const allowedAudioSidecarTypes = [...allowedAudioTypes, "video/mp4", "video/quicktime"] as const;
 const allowedUploadTypes = [...allowedTypes, ...allowedAudioTypes] as const;
 const sourceFormats = ["mp4", "mov", "mkv", "webm"] as const;
 const metadataSchema = z.record(z.string(), z.unknown()).optional();
@@ -184,7 +185,7 @@ uploadsRouter.post("/complete", async (req, res) => {
     audio_source: z.object({
       object_key: z.string(),
       filename: z.string(),
-      content_type: z.enum(allowedAudioTypes),
+      content_type: z.enum(allowedAudioSidecarTypes),
       size_bytes: z.number().optional(),
     }).optional(),
     local_original_filename: z.string().max(300).optional(),

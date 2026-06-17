@@ -24,15 +24,16 @@ function contentTypeForVideo(file: File) {
 }
 
 function contentTypeForAudio(file: File) {
-  if (file.type) return file.type;
   const extension = file.name.split(".").pop()?.toLowerCase();
   if (extension === "mp3") return "audio/mpeg";
+  if (extension === "mp4") return "audio/mp4";
   if (extension === "m4a") return "audio/mp4";
   if (extension === "aac") return "audio/aac";
   if (extension === "wav") return "audio/wav";
   if (extension === "webm") return "audio/webm";
   if (extension === "ogg") return "audio/ogg";
   if (extension === "flac") return "audio/flac";
+  if (file.type) return file.type;
   return "audio/mpeg";
 }
 
@@ -240,7 +241,7 @@ export function UploadClient() {
 
   return <section className="hero">
     <h1>Upload Existing Video</h1>
-    <p className="muted">Accepted video formats: mp4, mov, mkv, webm. Optional separate audio can be uploaded as mp3, wav, m4a, aac, ogg, flac, or webm.</p>
+    <p className="muted">Accepted video formats: mp4, mov, mkv, webm. Optional separate audio can be uploaded as mp3, mp4, wav, m4a, aac, ogg, flac, or webm.</p>
     <div className="grid grid-2">
       <div className="card">
         <h3>Upload Existing Video</h3>
@@ -256,7 +257,7 @@ export function UploadClient() {
         {file && <p className="muted">Selected: {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</p>}
         <br /><br />
         <label>Optional separate audio file</label>
-        <input className="input" type="file" accept=".mp3,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm" onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)} />
+        <input className="input" type="file" accept=".mp3,.mp4,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,video/mp4" onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)} />
         {audioFile && <p className="muted">Optional audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
         <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is merged with the video by the package worker.</p>
         {audioFile && <p className="warning">If the video already contains audio, VideoBlitzer will ask before replacing it with this separate audio file.</p>}
