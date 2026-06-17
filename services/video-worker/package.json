@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "tsx src/index.ts",
     "daemon": "tsx src/index.ts --daemon",
+    "daemon:imports": "tsx src/index.ts --daemon --mode=imports",
+    "daemon:exports": "tsx src/index.ts --daemon --mode=exports",
+    "daemon:packages": "tsx src/index.ts --daemon --mode=packages",
     "build": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "smoke:package-artifact": "tsx scripts/smoke-package-artifact.ts",

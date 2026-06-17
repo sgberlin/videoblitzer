@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { z } from "zod";
+import { ZodError, z } from "zod";
 import { requireAuth } from "../middleware/auth";
 import { jobRateLimit } from "../middleware/rateLimit";
 import { createServiceClient } from "../supabase";
@@ -247,9 +247,22 @@ packagesRouter.post("/generate", async (req, res) => {
       },
     });
   } catch (error) {
-    return res.status(500).json({
+    if (error instanceof ZodError) {
+      return res.status(400).json({
+        error: "Validation failed",
+        code: "validation_failed",
+        details: error.issues,
+      });
+    }
+    const statusCode = typeof (error as { statusCode?: unknown })?.statusCode === "number"
+      ? (error as { statusCode: number }).statusCode
+      : 500;
+    const code = typeof (error as { code?: unknown })?.code === "string"
+      ? (error as { code: string }).code
+      : "package_generate_failed";
+    return res.status(statusCode).json({
       error: error instanceof Error ? error.message : "Could not start package generation.",
-      code: "package_generate_failed",
+      code,
     });
   }
 });

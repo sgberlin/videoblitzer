@@ -45,6 +45,19 @@ function workerEnabled() {
   return process.env.VIDEOBLITZER_WORKER_DAEMON === "1" || process.argv.includes("--daemon");
 }
 
+type WorkerMode = "all" | "imports" | "exports" | "packages";
+
+function workerMode(): WorkerMode {
+  const argMode = process.argv.find((arg) => arg.startsWith("--mode="))?.split("=")[1];
+  const raw = String(argMode ?? process.env.VIDEOBLITZER_WORKER_MODE ?? "all").toLowerCase();
+  if (raw === "imports" || raw === "import") return "imports";
+  if (raw === "exports" || raw === "export") return "exports";
+  if (raw === "packages" || raw === "package") return "packages";
+  if (raw === "all") return "all";
+  console.warn(`[video-worker] unknown mode "${raw}", defaulting to "all"`);
+  return "all";
+}
+
 function supabase() {
   const url = process.env.SUPABASE_URL;
   const key = serviceKey();
@@ -115,15 +128,30 @@ export async function processOneExportJob() {
 
 export async function startWorkerDaemon() {
   const intervalMs = Number(process.env.VIDEO_WORKER_POLL_MS ?? 5000);
-  console.log(`VideoBlitzer video worker daemon polling every ${intervalMs}ms`);
+  const mode = workerMode();
+  console.log(`VideoBlitzer video worker daemon polling every ${intervalMs}ms (mode=${mode})`);
   for (;;) {
     try {
-      const importResult = await processOneImportJob(supabase());
-      if (importResult.processed) console.log("[video-worker] imported", importResult);
-      const result = await processOneExportJob();
-      if (result.processed) console.log("[video-worker] processed", result);
-      const packageResult = await processOnePackageJob();
-      if (packageResult.processed) console.log("[video-worker] packaged", packageResult);
+      const tasks: Array<Promise<{ label: string; result: Awaited<ReturnType<typeof processOneImportJob>> | Awaited<ReturnType<typeof processOneExportJob>> | Awaited<ReturnType<typeof processOnePackageJob>> }>> = [];
+      if (mode === "all" || mode === "imports") {
+        tasks.push(processOneImportJob(supabase()).then((result) => ({ label: "imported", result })));
+      }
+      if (mode === "all" || mode === "exports") {
+        tasks.push(processOneExportJob().then((result) => ({ label: "processed", result })));
+      }
+      if (mode === "all" || mode === "packages") {
+        tasks.push(processOnePackageJob().then((result) => ({ label: "packaged", result })));
+      }
+      const settled = await Promise.allSettled(tasks);
+      for (const item of settled) {
+        if (item.status === "rejected") {
+          console.error("[video-worker] poll task failed", item.reason instanceof Error ? item.reason.message : item.reason);
+          continue;
+        }
+        if (item.value.result.processed) {
+          console.log(`[video-worker] ${item.value.label}`, item.value.result);
+        }
+      }
     } catch (error) {
       console.error("[video-worker] poll failed", error instanceof Error ? error.message : error);
     }

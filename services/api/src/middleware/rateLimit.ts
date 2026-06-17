@@ -4,10 +4,19 @@ import { createClient } from "redis";
 import { config } from "../config";
 
 let redisStore: RedisStore | undefined;
+const isProduction = config.NODE_ENV === "production";
+
+if (!config.REDIS_URL && isProduction) {
+  throw new Error("REDIS_URL is required in production for consistent API rate limiting.");
+}
 
 if (config.REDIS_URL) {
   const client = createClient({ url: config.REDIS_URL });
-  client.connect().catch((error) => console.error("[rate-limit] redis connection failed", error instanceof Error ? error.message : error));
+  client.connect().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error("[rate-limit] redis connection failed", message);
+    if (isProduction) process.exit(1);
+  });
   redisStore = new RedisStore({ sendCommand: (...args: string[]) => client.sendCommand(args) });
 }
 

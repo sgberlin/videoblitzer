@@ -1364,6 +1364,11 @@ async function uploadRecording() {
   if (!savedFile) { setText("uploadStatus", "Record, recover, combine, or import a local video file first."); return; }
   try {
     await saveSettings();
+    if (packagePollInterval) window.clearInterval(packagePollInterval);
+    packagePollInterval = undefined;
+    packageJobState = null;
+    uploadedVideoState = null;
+    renderPackageState("Preparing upload...");
     updateUploadProgress(0);
     if (activeManifest) { activeManifest.uploadStatus = "uploading"; await window.videoBlitzerRecorder.saveManifest({ manifest: activeManifest, outputFolder: settings.outputFolder }).catch(() => undefined); }
     setText("uploadStatus", "Creating or selecting VideoBlitzer project...");

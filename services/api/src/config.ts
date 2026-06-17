@@ -5,6 +5,7 @@ dotenv.config();
 dotenv.config({ path: process.env.API_ENV_PATH ?? "/var/www/videoblitzer-api/.env" });
 
 const envSchema = z.object({
+  NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_NAME: z.string().default("VideoBlitzer"),
   APP_URL: z.string().url().default("https://app.videoblitzer.com"),
   API_URL: z.string().url().default("https://api.videoblitzer.com"),
