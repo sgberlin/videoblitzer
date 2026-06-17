@@ -6,6 +6,22 @@ import { createServiceClient } from "../supabase";
 export const dashboardRouter = Router();
 dashboardRouter.use(requireAuth);
 
+function summarizeJobError(error: string | null | undefined) {
+  if (!error) return "Failed";
+  const normalized = error.replace(/\s+/g, " ").trim();
+  const lower = normalized.toLowerCase();
+  if (lower.includes("error opening output file") || lower.includes("error opening output files")) {
+    return "Package rendering failed while creating an output video. Retry after the latest worker deploy.";
+  }
+  if (lower.includes("audio_only_source_not_supported")) {
+    return "This file contains audio only. Social media video packages require a video stream.";
+  }
+  if (lower.includes("ffmpeg exited")) {
+    return "Media processing failed in FFmpeg. Check the source media, then retry the package job.";
+  }
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+}
+
 dashboardRouter.get("/", async (req, res) => {
   const supabase = createServiceClient();
   const profile = {
@@ -53,6 +69,7 @@ dashboardRouter.get("/", async (req, res) => {
     return res.json(await emptyDashboard());
   }
 
+  const sanitizedFailedJobs = (failedJobs.data ?? []).map((job) => ({ ...job, error: summarizeJobError(job.error) }));
   console.info("[dashboard] response", { statusCode: 200, mode: "loaded", userEmail: req.user!.email });
   return res.json({
     projects: projects.data ?? [],
@@ -63,7 +80,7 @@ dashboardRouter.get("/", async (req, res) => {
     creditBalance: req.user!.isUnlimited || balance.data?.is_unlimited ? "Unlimited" : balance.data?.balance ?? 0,
     recentProjects: projects.data ?? [],
     pendingJobs: pendingJobs.data ?? [],
-    failedJobs: failedJobs.data ?? [],
+    failedJobs: sanitizedFailedJobs,
     usageEvents: usageEvents.data ?? [],
     exportJobs: exportJobs.data ?? [],
     storage,

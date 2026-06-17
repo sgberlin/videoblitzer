@@ -29,16 +29,21 @@ function filterForPreset(preset: ExportPreset) {
   return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}`;
 }
 
-export async function createNormalizedMaster(inputPath: string, outputPath: string) {
+function audioArgs(hasAudio: boolean, bitrate = "128k") {
+  return hasAudio ? ["-c:a", "aac", "-b:a", bitrate] : ["-an"];
+}
+
+export async function createNormalizedMaster(inputPath: string, outputPath: string, hasAudio = true) {
   await runCommand("ffmpeg", [
     "-y",
     "-i", inputPath,
+    "-map", "0:v:0",
+    ...(hasAudio ? ["-map", "0:a:0?"] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "20",
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "192k",
+    ...audioArgs(hasAudio, "192k"),
     "-movflags", "+faststart",
     outputPath,
   ], { timeoutMs: ffmpegTimeoutMs });
@@ -64,17 +69,18 @@ export async function createNormalizedMasterWithAudio(videoPath: string, audioPa
   ], { timeoutMs: ffmpegTimeoutMs });
 }
 
-export async function renderPresetExport(inputPath: string, outputPath: string, preset: ExportPreset) {
+export async function renderPresetExport(inputPath: string, outputPath: string, preset: ExportPreset, hasAudio = true) {
   await runCommand("ffmpeg", [
     "-y",
     "-i", inputPath,
+    "-map", "0:v:0",
+    ...(hasAudio ? ["-map", "0:a:0?"] : []),
     "-vf", filterForPreset(preset),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "22",
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "128k",
+    ...audioArgs(hasAudio),
     "-movflags", "+faststart",
     outputPath,
   ], { timeoutMs: ffmpegTimeoutMs });
@@ -90,25 +96,30 @@ function clipFilter(width: number, height: number) {
   return "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,unsharp=5:5:0.25";
 }
 
-function safeName(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 80) || "clip";
+function safeName(value: string, maxLength = 80) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, maxLength) || "clip";
 }
 
-export async function renderSocialClip(inputPath: string, outputPath: string, clip: ClipPlanItem, format: typeof socialClipFormats[number]) {
+function safeFileName(...parts: string[]) {
+  return `${parts.map((part) => safeName(part, 42)).filter(Boolean).join("_").slice(0, 160)}.mp4`;
+}
+
+export async function renderSocialClip(inputPath: string, outputPath: string, clip: ClipPlanItem, format: typeof socialClipFormats[number], hasAudio = true) {
   const duration = Math.max(1, clip.endSeconds - clip.startSeconds);
   await runCommand("ffmpeg", [
     "-y",
     "-ss", clip.startSeconds.toFixed(3),
     "-t", duration.toFixed(3),
     "-i", inputPath,
+    "-map", "0:v:0",
+    ...(hasAudio ? ["-map", "0:a:0?"] : []),
     "-vf", clipFilter(format.width, format.height),
-    "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
+    ...(hasAudio ? ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "22",
     "-pix_fmt", "yuv420p",
-    "-c:a", "aac",
-    "-b:a", "128k",
+    ...audioArgs(hasAudio),
     "-movflags", "+faststart",
     outputPath,
   ], { timeoutMs: ffmpegTimeoutMs });
@@ -133,6 +144,7 @@ export async function exportStage(input: {
   userId: string;
   projectId: string;
   packageJobId: string;
+  hasAudio?: boolean;
 }) {
   const selectedPresets = selectPackagePresets(input.requestedPresetIds);
   if (!selectedPresets.length) throw new Error("No valid export presets were selected for package generation.");
@@ -141,7 +153,7 @@ export async function exportStage(input: {
   for (const preset of selectedPresets) {
     const fileName = `${preset.id}.mp4`;
     const filePath = path.join(input.exportsDir, fileName);
-    await renderPresetExport(input.masterPath, filePath, preset);
+    await renderPresetExport(input.masterPath, filePath, preset, input.hasAudio ?? true);
     const objectKey = `packages/exports/${input.userId}/${input.projectId}/${input.packageJobId}/${fileName}`;
     await uploadFileToR2(filePath, objectKey, "video/mp4");
     artifacts.push({
@@ -170,6 +182,7 @@ export async function socialClipStage(input: {
   userId: string;
   projectId: string;
   packageJobId: string;
+  hasAudio?: boolean;
 }) {
   const clipArtifacts: Array<ExportArtifact & { filePath: string }> = [];
   const thumbnailArtifacts: Array<ExportArtifact & { filePath: string }> = [];
@@ -182,10 +195,10 @@ export async function socialClipStage(input: {
 
     for (const format of formats) {
       const folder = path.join(input.workdir, "clips", format.folder);
-      const fileName = `${format.platform}_${durationLabel}_${clip.id}_${titleSlug}.mp4`;
+      const fileName = safeFileName(format.platform, durationLabel, clip.id, titleSlug);
       const filePath = path.join(folder, fileName);
       await mkdir(folder, { recursive: true });
-      await renderSocialClip(input.masterPath, filePath, clip, format);
+      await renderSocialClip(input.masterPath, filePath, clip, format, input.hasAudio ?? true);
       const objectKey = `packages/assets/${input.userId}/${input.projectId}/${input.packageJobId}/clips/${format.folder}/${fileName}`;
       await uploadFileToR2(filePath, objectKey, "video/mp4");
       clipArtifacts.push({
@@ -211,7 +224,7 @@ export async function socialClipStage(input: {
     }
 
     const thumbnailDir = path.join(input.workdir, "thumbnails");
-    const thumbnailName = `${clip.id}_${titleSlug}.jpg`;
+    const thumbnailName = `${safeName(`${clip.id}-${titleSlug}`, 150)}.jpg`;
     const thumbnailPath = path.join(thumbnailDir, thumbnailName);
     await mkdir(thumbnailDir, { recursive: true });
     await renderThumbnail(input.masterPath, thumbnailPath, clip);

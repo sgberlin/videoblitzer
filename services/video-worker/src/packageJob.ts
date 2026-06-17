@@ -451,6 +451,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const sourceObjectKey = String((job.input?.sourceObjectKey as string | undefined) ?? video.storage_key ?? video.source_object_key ?? "");
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
     const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
+    const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
 
     const sourcePath = path.join(workdir, "source-input");
     const audioSourcePath = path.join(workdir, "audio-sidecar-input");
@@ -465,7 +466,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     });
 
     await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey) });
-    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath) : createNormalizedMaster(sourcePath, normalizedMasterPath));
+    await withHeartbeat(client, job, "normalize_master", () => audioSourceObjectKey ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath) : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports));
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
     const masterAsset: ExportArtifactWithPath = {
@@ -496,6 +497,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       userId: job.user_id,
       projectId: job.project_id,
       packageJobId: job.id,
+      hasAudio: hasAudioForExports,
     }));
 
     await markStage(client, job, "preset_exports", 70, { clipAssetCount: clipArtifacts.length });
@@ -507,6 +509,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       userId: job.user_id,
       projectId: job.project_id,
       packageJobId: job.id,
+      hasAudio: hasAudioForExports,
     }));
     const exportArtifacts = exportArtifactsWithPaths.map(({ filePath: _filePath, ...artifact }) => artifact);
     await persistExports(client, job, exportArtifacts);

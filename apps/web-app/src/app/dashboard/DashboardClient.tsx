@@ -14,6 +14,12 @@ function formatBytes(bytes: number) {
   return `${(bytes / 1024 ** index).toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function compactError(message?: string) {
+  if (!message) return "Failed";
+  const normalized = message.replace(/\s+/g, " ").trim();
+  return normalized.length > 220 ? `${normalized.slice(0, 217)}...` : normalized;
+}
+
 type DashboardDiagnostics = {
   hasSession: boolean;
   hasAccessToken: boolean;
@@ -150,7 +156,7 @@ export function DashboardClient() {
     <section className="grid grid-3">
       <div className="card"><h3>Recent Projects</h3>{data.recentProjects.length ? data.recentProjects.map((project) => <p key={project.id}><a href={`/projects/${project.id}/overview`}>{project.title}</a><br /><span className="muted">{project.status}</span></p>) : <p className="muted">No projects yet.</p>}</div>
       <div className="card"><h3>Pending Jobs</h3>{data.pendingJobs.length ? data.pendingJobs.map((job) => <p key={job.id}>{job.type} · <span className="status">{job.status}</span> · {job.progress ?? 0}%</p>) : <p className="muted">0 queued or processing jobs.</p>}</div>
-      <div className="card"><h3>Failed Jobs</h3>{data.failedJobs.length ? data.failedJobs.map((job) => <p key={job.id}>{job.type}<br /><span className="warning">{job.error ?? "Failed"}</span></p>) : <p className="muted">0 failed jobs.</p>}</div>
+      <div className="card"><h3>Failed Jobs</h3>{data.failedJobs.length ? data.failedJobs.map((job) => <p key={job.id}>{job.type}<br /><span className="warning">{compactError(job.error)}</span></p>) : <p className="muted">0 failed jobs.</p>}</div>
       <div className="card"><h3>R2 Storage Usage</h3><p className="muted">Bucket: {data.storage.bucket}</p><p>{formatBytes(data.storage.totalBytes)} across {data.storage.totalObjects} objects</p><p className="muted">Raw files: {data.storage.rawFiles} · Exports: {data.storage.exports} · Thumbnails: {data.storage.thumbnails} · Captions: {data.storage.captions}</p>{!data.storage.configured && <p className="warning">R2 credentials are not configured on the API server.</p>}</div>
       <div className="card"><h3>Usage Events</h3>{data.usageEvents.length ? data.usageEvents.map((event) => <p key={event.id}>{event.event_name}<br /><span className="muted">{event.created_at ? new Date(event.created_at).toLocaleString() : "recently"}</span></p>) : <p className="muted">No usage events recorded yet.</p>}</div>
       <div className="card"><h3>Owner Unlimited Mode</h3><p>{data.profile.isUnlimited ? "Unlimited access active. Credit deductions are bypassed server-side." : "Standard credit validation active."}</p></div>
