@@ -9,7 +9,7 @@ type CreatedProject = { project: { id: string; title: string; status: string } }
 type SignedUpload = { key: string; uploadUrl: string | null; expiresIn: number; expiresAt?: string; method?: "PUT"; mode: string };
 type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null } };
 type PackageJobResponse = { job_id: string; status: string };
-type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; output?: Record<string, unknown> };
+type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
 type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
@@ -106,9 +106,11 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));
   const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";
   const elapsed = formatStageElapsed(job?.output?.stageUpdatedAt);
+  const totalElapsed = formatStageElapsed(job?.created_at ?? job?.output?.stageUpdatedAt);
   const note = slowStageNotes[stage];
   return <div className="card">
     <h3>Package Progress</h3>
+    <p className="muted">Total time passed: {totalElapsed || "not started"}</p>
     <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%{elapsed ? ` · running ${elapsed}` : ""}</p>
     {note && job?.status === "processing" && <p className="muted">{note}</p>}
     <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}>
