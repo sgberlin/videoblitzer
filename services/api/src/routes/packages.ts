@@ -122,62 +122,63 @@ async function latestOwnedVideoForProject(userId: string, projectId: string) {
 }
 
 packagesRouter.post("/generate", async (req, res) => {
-  const body = packageInputSchema.parse(req.body);
-  if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
+  try {
+    const body = packageInputSchema.parse(req.body);
+    if (!await userOwnsProject(req.user!.id, body.projectId)) return res.status(404).json({ error: "Project not found" });
 
-  const video = (body.videoId
-    ? await getOwnedVideo(req.user!.id, body.videoId)
-    : await latestOwnedVideoForProject(req.user!.id, body.projectId)) as PackageVideo | null;
-  if (!video) return res.status(404).json({ error: "No uploaded video is available for this project yet." });
-  if (video.project_id !== body.projectId) return res.status(400).json({ error: "Selected video does not belong to the requested project." });
-  if (video.verification_status !== "verified") {
-    return res.status(409).json({
-      error: "Upload must be verified before producing a package.",
-      code: "upload_not_verified",
-      verificationStatus: video.verification_status ?? "unverified",
-    });
-  }
-  if (video.has_video !== true) {
-    return res.status(409).json({
-      error: "This file contains audio only. Social media video packages require a video stream.",
-      code: "audio_only_source_not_supported",
-      hasVideo: Boolean(video.has_video),
-      hasAudio: Boolean(video.has_audio),
-    });
-  }
+    const video = (body.videoId
+      ? await getOwnedVideo(req.user!.id, body.videoId)
+      : await latestOwnedVideoForProject(req.user!.id, body.projectId)) as PackageVideo | null;
+    if (!video) return res.status(404).json({ error: "No uploaded video is available for this project yet." });
+    if (video.project_id !== body.projectId) return res.status(400).json({ error: "Selected video does not belong to the requested project." });
+    if (video.verification_status !== "verified") {
+      return res.status(409).json({
+        error: "Upload must be verified before producing a package.",
+        code: "upload_not_verified",
+        verificationStatus: video.verification_status ?? "unverified",
+      });
+    }
+    if (video.has_video !== true) {
+      return res.status(409).json({
+        error: "This file contains audio only. Social media video packages require a video stream.",
+        code: "audio_only_source_not_supported",
+        hasVideo: Boolean(video.has_video),
+        hasAudio: Boolean(video.has_audio),
+      });
+    }
 
-  const sourceObjectKey = video.storage_key ?? video.source_object_key;
-  if (!sourceObjectKey) return res.status(400).json({ error: "Video source object key is missing." });
-  const sourceFormat = ((video.source_format ?? "mp4").toLowerCase() || "mp4");
-  const mimeType = video.content_type ?? video.mime_type ?? "video/mp4";
+    const sourceObjectKey = video.storage_key ?? video.source_object_key;
+    if (!sourceObjectKey) return res.status(400).json({ error: "Video source object key is missing." });
+    const sourceFormat = ((video.source_format ?? "mp4").toLowerCase() || "mp4");
+    const mimeType = video.content_type ?? video.mime_type ?? "video/mp4";
 
-  const creditResult = await enforceCredits({
-    userId: req.user!.id,
-    projectId: body.projectId,
-    action: "social_content_pack",
-    isUnlimited: req.user!.isUnlimited,
-    metadata: {
+    const creditResult = await enforceCredits({
+      userId: req.user!.id,
       projectId: body.projectId,
-      videoId: video.id,
+      action: "social_content_pack",
+      isUnlimited: req.user!.isUnlimited,
+      metadata: {
+        projectId: body.projectId,
+        videoId: video.id,
+        sourceObjectKey,
+        sourceFormat,
+        presetIds: body.presetIds ?? [],
+      },
+    });
+    if (!creditResult.ok) {
+      return res.status(402).json({
+        error: `Insufficient credits. Package generation requires ${creditResult.cost} credits.`,
+        code: "insufficient_credits",
+        creditCost: creditResult.cost,
+        balance: creditResult.balanceAfter,
+      });
+    }
+
+    const jobId = crypto.randomUUID();
+    const jobInput = {
       sourceObjectKey,
       sourceFormat,
-      presetIds: body.presetIds ?? [],
-    },
-  });
-  if (!creditResult.ok) {
-    return res.status(402).json({
-      error: `Insufficient credits. Package generation requires ${creditResult.cost} credits.`,
-      code: "insufficient_credits",
-      creditCost: creditResult.cost,
-      balance: creditResult.balanceAfter,
-    });
-  }
-
-  const jobId = crypto.randomUUID();
-  const jobInput = {
-    sourceObjectKey,
-    sourceFormat,
-    sourceMimeType: mimeType,
+      sourceMimeType: mimeType,
       verifiedAt: video.verified_at,
       verifiedSizeBytes: video.verified_size_bytes,
       hasVideo: video.has_video,
@@ -192,59 +193,65 @@ packagesRouter.post("/generate", async (req, res) => {
       audioSourceContentType: video.audio_source_content_type,
       audioSourceSizeBytes: video.audio_source_size_bytes,
       audioSourceMetadata: video.audio_source_metadata,
-    presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
-    includeClipPlan: body.includeClipPlan,
-  };
-  const supabase = createServiceClient();
-  if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
+      presetIds: body.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
+      includeClipPlan: body.includeClipPlan,
+    };
+    const supabase = createServiceClient();
+    if (!supabase) return res.status(503).json({ error: "Supabase service role is required." });
 
-  try {
-    const { error: enqueueError } = await supabase.rpc("enqueue_package_job_atomic", {
-      p_job_id: jobId,
-      p_project_id: body.projectId,
-      p_video_id: video.id,
-      p_user_id: req.user!.id,
-      p_input: jobInput,
-    });
-    if (enqueueError) {
-      if (!isMissingEnqueueRpc(enqueueError) && !isSchemaCacheMissingColumn(enqueueError)) throw new Error(enqueueError.message);
-      await enqueuePackageJobDirect({ supabase, jobId, projectId: body.projectId, videoId: video.id, userId: req.user!.id, jobInput });
+    try {
+      const { error: enqueueError } = await supabase.rpc("enqueue_package_job_atomic", {
+        p_job_id: jobId,
+        p_project_id: body.projectId,
+        p_video_id: video.id,
+        p_user_id: req.user!.id,
+        p_input: jobInput,
+      });
+      if (enqueueError) {
+        if (!isMissingEnqueueRpc(enqueueError) && !isSchemaCacheMissingColumn(enqueueError)) throw new Error(enqueueError.message);
+        await enqueuePackageJobDirect({ supabase, jobId, projectId: body.projectId, videoId: video.id, userId: req.user!.id, jobInput });
+      }
+      await supabase.from("usage_events").insert({
+        user_id: req.user!.id,
+        project_id: body.projectId,
+        event_name: "package_job_queued",
+        metadata: { jobId, videoId: video.id, presetIds: jobInput.presetIds },
+      });
+    } catch (error) {
+      await refundCredits({
+        userId: req.user!.id,
+        projectId: body.projectId,
+        action: "social_content_pack",
+        cost: creditResult.cost,
+        metadata: {
+          reason: "package_queue_failed",
+          projectId: body.projectId,
+          videoId: video.id,
+          message: error instanceof Error ? error.message : String(error),
+        },
+      }).catch(() => undefined);
+      return res.status(500).json({ error: error instanceof Error ? error.message : "Could not queue package job.", code: "package_queue_failed" });
     }
-    await supabase.from("usage_events").insert({
-      user_id: req.user!.id,
-      project_id: body.projectId,
-      event_name: "package_job_queued",
-      metadata: { jobId, videoId: video.id, presetIds: jobInput.presetIds },
+
+    return res.status(202).json({
+      job_id: jobId,
+      status: "queued",
+      job: {
+        id: jobId,
+        project_id: body.projectId,
+        video_id: video.id,
+        user_id: req.user!.id,
+        status: "queued",
+        progress: 0,
+        input: jobInput,
+      },
     });
   } catch (error) {
-    await refundCredits({
-      userId: req.user!.id,
-      projectId: body.projectId,
-      action: "social_content_pack",
-      cost: creditResult.cost,
-      metadata: {
-        reason: "package_queue_failed",
-        projectId: body.projectId,
-        videoId: video.id,
-        message: error instanceof Error ? error.message : String(error),
-      },
-    }).catch(() => undefined);
-    return res.status(500).json({ error: error instanceof Error ? error.message : "Could not queue package job.", code: "package_queue_failed" });
+    return res.status(500).json({
+      error: error instanceof Error ? error.message : "Could not start package generation.",
+      code: "package_generate_failed",
+    });
   }
-
-  return res.status(202).json({
-    job_id: jobId,
-    status: "queued",
-    job: {
-      id: jobId,
-      project_id: body.projectId,
-      video_id: video.id,
-      user_id: req.user!.id,
-      status: "queued",
-      progress: 0,
-      input: jobInput,
-    },
-  });
 });
 
 packagesRouter.get("/:id", async (req, res) => {
