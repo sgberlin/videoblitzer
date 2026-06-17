@@ -9,10 +9,24 @@ type CreatedProject = { project: { id: string; title: string; status: string } }
 type SignedUpload = { key: string; uploadUrl: string | null; expiresIn: number; expiresAt?: string; method?: "PUT"; mode: string };
 type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null } };
 type PackageJobResponse = { job_id: string; status: string };
+type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; output?: Record<string, unknown> };
+type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
 type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
+
+const packageStages = [
+  { key: "queued", label: "Queued" },
+  { key: "download_source", label: "Downloading source media" },
+  { key: "normalize_master", label: "Merging and normalizing media" },
+  { key: "analyze", label: "Detecting highlights" },
+  { key: "rendering_clips", label: "Creating social clips" },
+  { key: "preset_exports", label: "Creating export presets" },
+  { key: "validating_assets", label: "Validating generated assets" },
+  { key: "building_zip", label: "Building ZIP package" },
+  { key: "completed", label: "Complete" },
+];
 
 function contentTypeForVideo(file: File) {
   if (file.type) return file.type;
@@ -48,6 +62,40 @@ function formatEta(seconds: number | null) {
   const minutes = Math.floor(seconds / 60);
   const remainder = Math.round(seconds % 60);
   return `${minutes}m ${remainder}s`;
+}
+
+function friendlyPackageError(error: unknown) {
+  const message = error instanceof Error ? error.message : "Could not produce package.";
+  if (message.toLowerCase() === "failed to fetch") return "Could not contact the API. Check deployment/network status, then try Produce Package again.";
+  return message;
+}
+
+function isPackageWarning(message: string) {
+  const lower = message.toLowerCase();
+  return lower.includes("audio only") || lower.includes("could not") || lower.includes("failed") || lower.includes("unavailable") || lower.includes("not available");
+}
+
+function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJob | null; onDownload: () => void; downloadBusy: boolean }) {
+  const stage = String(job?.stage ?? job?.output?.stage ?? (job?.status === "completed" ? "completed" : "queued"));
+  const progress = Math.min(100, Math.max(0, Number(job?.progress ?? 0)));
+  const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));
+  const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";
+  return <div className="card">
+    <h3>Package Progress</h3>
+    <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%</p>
+    <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}>
+      <div style={{ width: `${progress}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} />
+    </div>
+    <div className="grid grid-2">
+      {packageStages.map((item, index) => {
+        const reached = Boolean(job) && index <= activeIndex;
+        const current = Boolean(job) && index === activeIndex && job?.status !== "completed";
+        return <p key={item.key} className={reached ? "status" : "muted"}>{reached ? "[x]" : "[ ]"} {current ? "Now: " : ""}{item.label}</p>;
+      })}
+    </div>
+    {job?.error_message && <p className="warning">{job.error_message}</p>}
+    {job?.status === "completed" && <button className="button" disabled={downloadBusy} onClick={onDownload}>{downloadBusy ? "Opening..." : "Download Package ZIP"}</button>}
+  </div>;
 }
 
 function uploadToSignedUrl(file: File, signed: SignedUpload, contentType: string, onProgress: (value: UploadProgress) => void) {
@@ -93,9 +141,11 @@ export function UploadClient() {
   const [status, setStatus] = useState("Choose a video file to start.");
   const [projectUrl, setProjectUrl] = useState("");
   const [uploadedVideo, setUploadedVideo] = useState<UploadedVideoState | null>(null);
+  const [packageJob, setPackageJob] = useState<PackageJob | null>(null);
   const [packageStatus, setPackageStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [packageBusy, setPackageBusy] = useState(false);
+  const [downloadBusy, setDownloadBusy] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const auth = useAuthSession();
 
@@ -122,6 +172,14 @@ export function UploadClient() {
       });
   }, [auth.email, auth.session?.access_token, auth.status]);
 
+  useEffect(() => {
+    if (!auth.session?.access_token || !packageJob?.id || ["completed", "failed"].includes(String(packageJob.status))) return;
+    const timer = window.setInterval(() => {
+      void refreshPackageJob(packageJob.id!);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [auth.session?.access_token, packageJob?.id, packageJob?.status]);
+
   async function resolveProject(fileToUpload: File) {
     if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
     if (selectedProjectId !== "new") {
@@ -142,6 +200,7 @@ export function UploadClient() {
     setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: audioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: audioFile ? "preparing" : "idle" });
     setProjectUrl("");
     setUploadedVideo(null);
+    setPackageJob(null);
     setPackageStatus("");
 
     try {
@@ -227,12 +286,36 @@ export function UploadClient() {
         method: "POST",
         body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id }),
       }, auth.session.access_token);
-      setPackageStatus(`Package queued: ${response.job_id}. Opening Social Media Production...`);
-      window.location.href = `/projects/${uploadedVideo.project_id}/social-production`;
+      setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
+      setPackageStatus(`Package queued: ${response.job_id}. Processing has started.`);
+      await refreshPackageJob(response.job_id).catch(() => undefined);
     } catch (error) {
-      setPackageStatus(error instanceof Error ? error.message : "Could not produce package.");
+      setPackageStatus(friendlyPackageError(error));
     } finally {
       setPackageBusy(false);
+    }
+  }
+
+  async function refreshPackageJob(packageJobId: string) {
+    if (!auth.session?.access_token) return;
+    const response = await apiFetch<PackageStatusResponse>(`/packages/${packageJobId}`, {}, auth.session.access_token);
+    setPackageJob(response.packageJob);
+    if (response.packageJob.status === "completed") setPackageStatus("Package complete. ZIP is ready to download.");
+    else if (response.packageJob.status === "failed") setPackageStatus(response.packageJob.error_message ?? "Package failed. Open Social Media Production for details.");
+  }
+
+  async function downloadPackageZip() {
+    if (!auth.session?.access_token || !packageJob?.id) return;
+    setDownloadBusy(true);
+    try {
+      const response = await apiFetch<{ downloadUrl: string | null }>(`/packages/${packageJob.id}/download`, {}, auth.session.access_token);
+      if (!response.downloadUrl) throw new Error("Package ZIP is not available yet.");
+      window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
+      setPackageStatus("Opened package ZIP download.");
+    } catch (error) {
+      setPackageStatus(friendlyPackageError(error));
+    } finally {
+      setDownloadBusy(false);
     }
   }
 
@@ -286,10 +369,15 @@ export function UploadClient() {
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
           <button className="button" onClick={() => void producePackage()} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Package"}</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
-          {packageStatus && <p className={packageStatus.toLowerCase().includes("audio only") || packageStatus.toLowerCase().includes("could not") ? "warning" : "muted"}>{packageStatus}</p>}
+          {packageStatus && <p className={isPackageWarning(packageStatus) ? "warning" : "muted"}>{packageStatus}</p>}
         </div>}
       </div>
-      <div className="card"><h3>Record New Match</h3><p className="muted">Coming desktop app. Use replay buffers, hotkeys, and separate tracks, then upload to the dashboard.</p><button className="button secondary">Coming Desktop App</button></div>
+      <div className="card">
+        <h3>Package Creation</h3>
+        <p className="muted">After upload verification, click Produce Package and watch each processing stage here. Keep this page open to follow long game videos through ZIP creation.</p>
+        <PackageProgressPanel job={packageJob} onDownload={() => void downloadPackageZip()} downloadBusy={downloadBusy} />
+        {projectUrl && <p><a className="button secondary" href={projectUrl}>Open Social Media Production</a></p>}
+      </div>
     </div>
   </section>;
 }
