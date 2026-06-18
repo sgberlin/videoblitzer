@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { analyzeStage } from "./analyzeStage";
+import { analyzeStage, probeDurationSeconds } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
 import { createFastNormalizedMaster, createFastNormalizedMasterWithAudio, createNormalizedMaster, createNormalizedMasterWithAudio, exportStage, socialClipStage } from "./exportStage";
 import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
@@ -627,7 +627,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
     const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
     const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
-    const sourceDurationSeconds = typeof video.duration_seconds === "number" ? video.duration_seconds : undefined;
+    let sourceDurationSeconds = typeof video.duration_seconds === "number" && Number.isFinite(video.duration_seconds) && video.duration_seconds > 0 ? video.duration_seconds : undefined;
     const mode = packageMode(job);
     const variant = packageVariant(job);
     const options = packageOptions(job);
@@ -644,8 +644,20 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       await downloadR2File(sourceObjectKey, sourcePath);
       if (audioSourceObjectKey) await downloadR2File(audioSourceObjectKey, audioSourcePath);
     });
+    if (!sourceDurationSeconds) {
+      sourceDurationSeconds = await probeDurationSeconds(sourcePath).catch(() => undefined);
+    }
 
-    await markStage(client, job, "normalize_master", 25, { audioSidecar: Boolean(audioSourceObjectKey), packageMode: mode, fastCopyMaster: useFastCopyMaster });
+    await markStage(client, job, "normalize_master", 25, {
+      audioSidecar: Boolean(audioSourceObjectKey),
+      packageMode: mode,
+      fastCopyMaster: useFastCopyMaster,
+      stageProgressPercent: 0,
+      itemLabel: "Merging and normalizing media",
+      itemIndex: 1,
+      itemTotal: 1,
+      durationSeconds: sourceDurationSeconds,
+    });
     const reportNormalizeProgress = stageProgressReporter({ client, job, stage: "normalize_master", startProgress: 25, endProgress: 40 });
     await withHeartbeat(client, job, "normalize_master", () => {
       if (useFastCopyMaster && audioSourceObjectKey) return createFastNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress);

@@ -23,10 +23,32 @@ type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "
 type PackageJobResponse = { job_id: string; status: string };
 type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
+type DuplicateStatusResponse = {
+  duplicateDetected?: boolean;
+  duplicateOfVideoId?: string | null;
+  originalProject?: DuplicateSummary["originalProject"];
+  originalVideo?: Record<string, unknown>;
+  packageCount?: number;
+  completedPackageCount?: number;
+  availablePackageTypes?: string[];
+  lastPackageCreatedAt?: string | null;
+  packageJobs?: ExistingPackageJob[];
+};
 type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
+type SavedUploadSession = {
+  savedAt: string;
+  projectUrl: string;
+  uploadedVideo: UploadedVideoState;
+  packageJob?: PackageJob | null;
+  duplicate?: DuplicateSummary | null;
+  status?: string;
+  packageStatus?: string;
+};
+
+const savedUploadSessionKey = "videoblitzer.upload.resume.v1";
 
 const packageStages = [
   { key: "queued", label: "Queued", start: 0, end: 15 },
@@ -115,6 +137,52 @@ function friendlyPackageError(error: unknown) {
 function isPackageWarning(message: string) {
   const lower = message.toLowerCase();
   return lower.includes("audio only") || lower.includes("could not") || lower.includes("failed") || lower.includes("unavailable") || lower.includes("not available");
+}
+
+function loadSavedUploadSession() {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(savedUploadSessionKey);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as SavedUploadSession;
+    if (!parsed.uploadedVideo?.id || !parsed.uploadedVideo.project_id) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function saveUploadSession(session: SavedUploadSession | null) {
+  if (typeof window === "undefined") return;
+  if (!session) {
+    window.localStorage.removeItem(savedUploadSessionKey);
+    return;
+  }
+  window.localStorage.setItem(savedUploadSessionKey, JSON.stringify({ ...session, savedAt: new Date().toISOString() }));
+}
+
+function duplicateFromStatus(response: DuplicateStatusResponse): DuplicateSummary | null {
+  if (!response.duplicateDetected) return null;
+  return {
+    originalVideo: response.originalVideo,
+    originalProject: response.originalProject ?? null,
+    packageCount: response.packageCount ?? 0,
+    completedPackageCount: response.completedPackageCount ?? 0,
+    availablePackageTypes: response.availablePackageTypes ?? [],
+    lastPackageCreatedAt: response.lastPackageCreatedAt ?? null,
+    packageJobs: response.packageJobs ?? [],
+  };
+}
+
+function openDownloadUrl(url: string) {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.download = "videoblitzer-package.zip";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJob | null; onDownload: () => void; downloadBusy: boolean }) {
@@ -234,6 +302,20 @@ export function UploadClient() {
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const auth = useAuthSession();
 
+  function persistCurrentSession(patch: Partial<SavedUploadSession> = {}) {
+    const video = patch.uploadedVideo ?? uploadedVideo;
+    if (!video) return;
+    saveUploadSession({
+      savedAt: new Date().toISOString(),
+      projectUrl: patch.projectUrl ?? (projectUrl || `/projects/${video.project_id}/social-production`),
+      uploadedVideo: video,
+      packageJob: patch.packageJob !== undefined ? patch.packageJob : packageJob,
+      duplicate: patch.duplicate !== undefined ? patch.duplicate : duplicate,
+      status: patch.status ?? status,
+      packageStatus: patch.packageStatus ?? packageStatus,
+    });
+  }
+
   useEffect(() => {
     if (auth.status !== "authenticated") {
       setAuthStatus(auth.status);
@@ -258,12 +340,32 @@ export function UploadClient() {
   }, [auth.email, auth.session?.access_token, auth.status]);
 
   useEffect(() => {
+    if (auth.status !== "authenticated" || !auth.session?.access_token || uploadedVideo) return;
+    const saved = loadSavedUploadSession();
+    if (!saved) return;
+    setUploadedVideo(saved.uploadedVideo);
+    setProjectUrl(saved.projectUrl || `/projects/${saved.uploadedVideo.project_id}/social-production`);
+    setPackageJob(saved.packageJob ?? null);
+    setDuplicate(saved.duplicate ?? null);
+    setProgress((current) => ({ ...current, percent: 100, state: "complete" }));
+    setStatus(saved.status || "Restored your saved upload. You can continue package production.");
+    setPackageStatus(saved.packageStatus || "Restored saved package state.");
+    void refreshDuplicateStatus(saved.uploadedVideo.id).catch(() => undefined);
+    if (saved.packageJob?.id) void refreshPackageJob(saved.packageJob.id).catch(() => undefined);
+  }, [auth.session?.access_token, auth.status, uploadedVideo]);
+
+  useEffect(() => {
     if (!auth.session?.access_token || !packageJob?.id || ["completed", "failed"].includes(String(packageJob.status))) return;
     const timer = window.setInterval(() => {
       void refreshPackageJob(packageJob.id!);
     }, 4000);
     return () => window.clearInterval(timer);
   }, [auth.session?.access_token, packageJob?.id, packageJob?.status]);
+
+  useEffect(() => {
+    if (!uploadedVideo) return;
+    persistCurrentSession();
+  }, [uploadedVideo, duplicate, packageJob?.id, packageJob?.status, packageJob?.progress, packageJob?.stage, packageStatus, projectUrl, status]);
 
   async function resolveProject(fileToUpload: File) {
     if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
@@ -288,6 +390,7 @@ export function UploadClient() {
     setDuplicate(null);
     setPackageJob(null);
     setPackageStatus("");
+    saveUploadSession(null);
 
     try {
       if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
@@ -353,8 +456,19 @@ export function UploadClient() {
       if (audioFile) setAudioProgress((current) => ({ ...current, state: "complete" }));
       setUploadedVideo(completed.video);
       setDuplicate(completed.duplicate ?? null);
-      setStatus(completed.duplicate ? "This video appears to match a previous upload." : completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.");
-      setProjectUrl(`/projects/${created.project.id}/social-production`);
+      const nextStatus = completed.duplicate ? "This video appears to match a previous upload." : completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.";
+      const nextProjectUrl = `/projects/${created.project.id}/social-production`;
+      setStatus(nextStatus);
+      setProjectUrl(nextProjectUrl);
+      saveUploadSession({
+        savedAt: new Date().toISOString(),
+        projectUrl: nextProjectUrl,
+        uploadedVideo: completed.video,
+        packageJob: null,
+        duplicate: completed.duplicate ?? null,
+        status: nextStatus,
+        packageStatus: "",
+      });
     } catch (error) {
       setProgress((current) => ({ ...current, state: "failed" }));
       if (audioFile) setAudioProgress((current) => ({ ...current, state: "failed" }));
@@ -375,6 +489,7 @@ export function UploadClient() {
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}. Processing has started.`);
+      persistCurrentSession({ packageJob: { id: response.job_id, status: response.status, stage: "queued", progress: 0 }, packageStatus: `${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}. Processing has started.` });
       await refreshPackageJob(response.job_id).catch(() => undefined);
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
@@ -394,8 +509,8 @@ export function UploadClient() {
     try {
       const response = await apiFetch<{ downloadUrl?: string | null; packageJob?: PackageJob }>(`/packages/${completedJob.id}/reuse`, { method: "POST" }, auth.session.access_token);
       if (response.packageJob) setPackageJob(response.packageJob);
-      if (response.downloadUrl) window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
-      setPackageStatus("Reused existing package. No package credits charged.");
+      if (response.downloadUrl) openDownloadUrl(response.downloadUrl);
+      setPackageStatus("Reused existing package. No package credits charged. Large ZIP downloads may show as .crdownload until Chrome finishes.");
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
     } finally {
@@ -413,6 +528,7 @@ export function UploadClient() {
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.`);
+      persistCurrentSession({ packageJob: { id: response.job_id, status: response.status, stage: "queued", progress: 0 }, packageStatus: `Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.` });
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
     } finally {
@@ -447,6 +563,7 @@ export function UploadClient() {
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`Custom package queued: ${response.job_id}. It will reuse saved analysis when available.`);
+      persistCurrentSession({ packageJob: { id: response.job_id, status: response.status, stage: "queued", progress: 0 }, packageStatus: `Custom package queued: ${response.job_id}. It will reuse saved analysis when available.` });
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
     } finally {
@@ -462,14 +579,20 @@ export function UploadClient() {
     else if (response.packageJob.status === "failed") setPackageStatus(response.packageJob.error_message ?? "Package failed. Open Social Media Production for details.");
   }
 
+  async function refreshDuplicateStatus(videoId: string) {
+    if (!auth.session?.access_token) return;
+    const response = await apiFetch<DuplicateStatusResponse>(`/videos/${videoId}/duplicate-status`, {}, auth.session.access_token);
+    setDuplicate(duplicateFromStatus(response));
+  }
+
   async function downloadPackageZip() {
     if (!auth.session?.access_token || !packageJob?.id) return;
     setDownloadBusy(true);
     try {
       const response = await apiFetch<{ downloadUrl: string | null }>(`/packages/${packageJob.id}/download`, {}, auth.session.access_token);
       if (!response.downloadUrl) throw new Error("Package ZIP is not available yet.");
-      window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
-      setPackageStatus("Opened package ZIP download.");
+      openDownloadUrl(response.downloadUrl);
+      setPackageStatus("Download started. Large ZIP files can show as .crdownload until Chrome finishes. If it stops, click Download Package ZIP again.");
     } catch (error) {
       setPackageStatus(friendlyPackageError(error));
     } finally {
@@ -504,6 +627,7 @@ export function UploadClient() {
         {audioFile && <p className="warning">If the video already contains audio, VideoBlitzer will ask before replacing it with this separate audio file.</p>}
         <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Upload Existing Video"}</button>
         <p className={progress.state === "failed" ? "warning" : progress.state === "complete" ? "status" : "muted"}>{status}</p>
+        {uploadedVideo && <p className="status">Saved. If the browser refreshes, this upload and package job will be restored here.</p>}
         <div className="card">
           <strong>Video: {progress.percent}% uploaded</strong>
           <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}><div style={{ width: `${progress.percent}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} /></div>
@@ -535,6 +659,7 @@ export function UploadClient() {
       <div className="card">
         <h3>Package Creation</h3>
         <p className="muted">After upload verification, click Produce Package and watch each processing stage here. Keep this page open to follow long game videos through ZIP creation.</p>
+        {uploadedVideo && <p className="status">Current work is saved. You can refresh and continue from this package state.</p>}
         <PackageProgressPanel job={packageJob} onDownload={() => void downloadPackageZip()} downloadBusy={downloadBusy} />
         {projectUrl && <p><a className="button secondary" href={projectUrl}>Open Social Media Production</a></p>}
       </div>

@@ -23,6 +23,17 @@ function JsonCard({ title, value }: { title: string; value: unknown }) {
 
 function EmptyState({ label }: { label: string }) { return <p className="muted">No {label} records yet. Generate or confirm content to populate this workspace tab.</p>; }
 
+function openDownloadUrl(url: string) {
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.download = "videoblitzer-package.zip";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+}
+
 const packageStages = [
   { key: "queued", label: "Queued" },
   { key: "download_source", label: "Probing source" },
@@ -153,8 +164,8 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     try {
       const response = await apiFetch<{ downloadUrl: string | null }>(`/packages/${latestPackage.id}/download`, {}, token);
       if (!response.downloadUrl) throw new Error("Signed download is not available yet.");
-      window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
-      setMessage("Opened package ZIP download.");
+      openDownloadUrl(response.downloadUrl);
+      setMessage("Download started. Large ZIP files can show as .crdownload until Chrome finishes. If it stops, click Download Package ZIP again.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not open package ZIP.");
     }
@@ -165,8 +176,8 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     try {
       const response = await apiFetch<{ downloadUrl: string | null }>(`/packages/${packageJobId}/download`, {}, token);
       if (!response.downloadUrl) throw new Error("Signed download is not available yet.");
-      window.open(response.downloadUrl, "_blank", "noopener,noreferrer");
-      setMessage("Opened previous package ZIP download.");
+      openDownloadUrl(response.downloadUrl);
+      setMessage("Download started. Large ZIP files can show as .crdownload until Chrome finishes. If it stops, click Download Previous ZIP again.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not open package ZIP.");
     }
