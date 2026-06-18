@@ -205,6 +205,19 @@ terminateSource.setEventHandler {
 }
 terminateSource.resume()
 
+let stdinHandle = FileHandle.standardInput
+stdinHandle.readabilityHandler = { handle in
+  let data = handle.availableData
+  if data.isEmpty {
+    Task { await recorder.stop(); Foundation.exit(0) }
+    return
+  }
+  let input = String(data: data, encoding: .utf8) ?? ""
+  if input.lowercased().contains("stop") {
+    Task { await recorder.stop(); Foundation.exit(0) }
+  }
+}
+
 Task {
   do {
     try await recorder.start()

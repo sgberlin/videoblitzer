@@ -61,7 +61,7 @@ const allowedFolders = new Set<string>();
 const ffmpegPath = resolveBundledTool("ffmpeg-static") || "ffmpeg";
 const ffprobePath = resolveBundledTool("ffprobe-static") || "ffprobe";
 logStartup("media tool paths resolved", { ffmpegPath, ffprobePath });
-let nativeScreenCapture: { process: ReturnType<typeof spawn>; filePath: string; stderr: string } | null = null;
+let nativeScreenCapture: { process: ReturnType<typeof spawn>; filePath: string; stderr: string; stdout: string } | null = null;
 let mainWindow: BrowserWindow | null = null;
 
 function rememberPath(filePath: string) {
@@ -279,10 +279,10 @@ async function startNativeScreenCapture(input: { outputFolder?: string; filename
   if (!existsSync(helperPath)) throw new Error(`ScreenCaptureKit helper was not found at ${helperPath}. Rebuild the recorder.`);
   const args = ["--output", filePath, "--fps", String(input.frameRate || 60)];
   if (input.displayId) args.push("--display-id", input.displayId);
-  const child = spawn(helperPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const child = spawn(helperPath, args, { stdio: ["pipe", "pipe", "pipe"] });
   let stdout = "";
   let stderr = "";
-  nativeScreenCapture = { process: child, filePath, stderr };
+  nativeScreenCapture = { process: child, filePath, stderr, stdout };
   logStartup("native screen capture starting", { helperPath, filePath, displayId: input.displayId });
   return await new Promise<{ ok: true; filePath: string }>((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -292,6 +292,8 @@ async function startNativeScreenCapture(input: { outputFolder?: string; filename
     }, 10_000);
     child.stdout.on("data", (chunk: Buffer) => {
       stdout += chunk.toString();
+      logStartup("native screen capture helper stdout", { line: chunk.toString().trim() });
+      if (nativeScreenCapture) nativeScreenCapture.stdout = stdout;
       if (stdout.includes("VIDEO_BLITZER_SCK_STARTED")) {
         clearTimeout(timer);
         resolve({ ok: true, filePath });
@@ -299,6 +301,7 @@ async function startNativeScreenCapture(input: { outputFolder?: string; filename
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderr += chunk.toString();
+      logStartup("native screen capture helper stderr", { line: chunk.toString().trim() });
       if (nativeScreenCapture) nativeScreenCapture.stderr = stderr;
     });
     child.on("error", (error) => {
@@ -307,6 +310,7 @@ async function startNativeScreenCapture(input: { outputFolder?: string; filename
       reject(error);
     });
     child.on("close", (code) => {
+      logStartup("native screen capture helper closed", { code, filePath, stderrTail: stderr.slice(-300), stdoutTail: stdout.slice(-300) });
       if (stdout.includes("VIDEO_BLITZER_SCK_STARTED")) return;
       clearTimeout(timer);
       nativeScreenCapture = null;
@@ -319,7 +323,12 @@ async function stopNativeScreenCapture() {
   const capture = nativeScreenCapture;
   if (!capture) throw new Error("Native screen capture is not running.");
   nativeScreenCapture = null;
-  capture.process.kill("SIGINT");
+  try {
+    capture.process.stdin?.write("stop\n");
+    capture.process.stdin?.end();
+  } catch {
+    capture.process.kill("SIGINT");
+  }
   await new Promise<void>((resolve) => {
     const timer = setTimeout(() => {
       capture.process.kill("SIGTERM");
@@ -330,10 +339,11 @@ async function stopNativeScreenCapture() {
       resolve();
     });
   });
-  if (!existsSync(capture.filePath)) throw new Error(`Native screen capture did not create ${capture.filePath}. ${capture.stderr.slice(-800)}`.trim());
+  if (!existsSync(capture.filePath)) throw new Error(`Native screen capture did not create ${capture.filePath}. ${capture.stderr.slice(-800)} ${capture.stdout.slice(-800)}`.trim());
   const sizeBytes = (await stat(capture.filePath)).size;
-  if (!sizeBytes) throw new Error(`Native screen capture created an empty file. ${capture.stderr.slice(-800)}`.trim());
+  if (!sizeBytes) throw new Error(`Native screen capture created an empty file. ${capture.stderr.slice(-800)} ${capture.stdout.slice(-800)}`.trim());
   rememberPath(capture.filePath);
+  logStartup("native screen capture finalized", { filePath: capture.filePath, sizeBytes });
   return { filePath: capture.filePath, sizeBytes };
 }
 

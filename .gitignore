@@ -15,3 +15,4 @@ build
 !apps/desktop-recorder/build/**
 apps/desktop-recorder/build/icon.iconset/
 apps/desktop-recorder/release/
+test-social-package-source.mp4
