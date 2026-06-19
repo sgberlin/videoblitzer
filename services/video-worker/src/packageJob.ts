@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { analyzeStage, probeDurationSeconds } from "./analyzeStage";
+import { analyzeStage, probeDurationSeconds, probeHasAudio } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
 import { createFastNormalizedMaster, createFastNormalizedMasterWithAudio, createFinalEdit, createNormalizedMaster, createNormalizedMasterWithAudio, exportStage } from "./exportStage";
 import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
@@ -38,7 +38,7 @@ async function updatePackageState(
   const safePatch = { ...patch };
   if ("progress" in safePatch) {
     const progress = Number(safePatch.progress);
-    safePatch.progress = Number.isFinite(progress) ? clampProgress(progress) : 0;
+    safePatch.progress = status === "completed" ? 100 : Number.isFinite(progress) ? clampProgress(progress) : 0;
   }
   const packagePatch = {
     status,
@@ -262,7 +262,7 @@ function clipPlanFromMatchEvents(events: MatchTimelineEvent[], durationSeconds: 
 
 const finalEditMinimumSeconds = 15 * 60;
 const finalEditMaximumSeconds = 20 * 60;
-const verticalReelMaximumSeconds = 10 * 60;
+const verticalReelMaximumSeconds = 3 * 60;
 
 function clampDuration(value: number, minimum: number, maximum: number) {
   return Math.min(maximum, Math.max(minimum, value));
@@ -376,10 +376,10 @@ function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSec
   const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, goals.length ? goals.length : 3);
   let total = 0;
   return selected.map((clip, index) => {
-    const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(120, (clip.endSeconds - clip.startSeconds) * 0.7)));
-    const startSeconds = Math.max(0, center - 120);
-    const plannedEndSeconds = Math.min(durationSeconds, center + 60);
-    const plannedDuration = Math.max(45, plannedEndSeconds - startSeconds);
+    const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(35, (clip.endSeconds - clip.startSeconds) * 0.7)));
+    const startSeconds = Math.max(0, center - 25);
+    const plannedEndSeconds = Math.min(durationSeconds, center + 20);
+    const plannedDuration = Math.min(45, Math.max(25, plannedEndSeconds - startSeconds));
     const remaining = verticalReelMaximumSeconds - total;
     if (remaining <= 0) return null;
     const cappedDuration = Math.min(plannedDuration, remaining);
@@ -899,7 +899,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const sourceObjectKey = String((job.input?.sourceObjectKey as string | undefined) ?? video.storage_key ?? video.source_object_key ?? "");
     if (!sourceObjectKey) throw new Error("Package job source object key is missing.");
     const audioSourceObjectKey = String((job.input?.audioSourceObjectKey as string | undefined) ?? video.audio_source_object_key ?? "");
-    const hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
+    let hasAudioForExports = Boolean(audioSourceObjectKey || video.has_audio);
     let sourceDurationSeconds = typeof video.duration_seconds === "number" && Number.isFinite(video.duration_seconds) && video.duration_seconds > 0 ? video.duration_seconds : undefined;
     const mode = packageMode(job);
     const variant = packageVariant(job);
@@ -945,6 +945,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
         ? createNormalizedMasterWithAudio(sourcePath, audioSourcePath, normalizedMasterPath, sourceDurationSeconds, reportNormalizeProgress)
         : createNormalizedMaster(sourcePath, normalizedMasterPath, hasAudioForExports, sourceDurationSeconds, reportNormalizeProgress);
     });
+    hasAudioForExports = await probeHasAudio(normalizedMasterPath).catch(() => hasAudioForExports);
     const masterObjectKey = `packages/masters/${job.user_id}/${job.project_id}/${job.id}/normalized-master.mp4`;
     await uploadFileToR2(normalizedMasterPath, masterObjectKey, "video/mp4");
     const masterAsset: ExportArtifactWithPath = {

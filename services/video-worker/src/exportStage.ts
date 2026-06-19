@@ -33,7 +33,7 @@ function filterForPreset(preset: ExportPreset) {
     return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2`;
   }
   if (preset.aspectRatio === "9:16") {
-    return "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=28[bg];[fg]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,unsharp=5:5:0.25";
+    return "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,unsharp=5:5:0.2";
   }
   return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}`;
 }
@@ -242,6 +242,8 @@ function escapeSubtitleText(value: string) {
 function eventOverlayText(clip: ClipPlanItem) {
   const note = clip.note?.trim();
   const label = clip.label.trim();
+  const text = `${label} ${note ?? ""}`.toLowerCase();
+  if (text.includes("candidate highlight") || text.includes("context sequence")) return "";
   if (note && !note.toLowerCase().includes(label.toLowerCase())) {
     return `${label} - ${note}`;
   }
@@ -274,19 +276,25 @@ export async function createFinalEdit(input: {
     .join("\n");
   const durationSeconds = clips.reduce((sum, clip) => sum + Math.max(0, clip.endSeconds - clip.startSeconds), 0);
   await writeFile(editListPath, `${concatList}\n`, "utf8");
+  let hasSubtitleEntries = false;
   if (input.burnCaptions) {
     let cursor = 0;
-    const srt = clips.map((clip, index) => {
+    let subtitleIndex = 0;
+    const srt = clips.map((clip) => {
       const duration = Math.max(0, clip.endSeconds - clip.startSeconds);
       const start = cursor;
       const end = Math.min(cursor + duration, cursor + 7);
       cursor += duration;
-      return `${index + 1}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${escapeSubtitleText(eventOverlayText(clip))}\n`;
+      const text = escapeSubtitleText(eventOverlayText(clip));
+      if (!text) return "";
+      hasSubtitleEntries = true;
+      subtitleIndex += 1;
+      return `${subtitleIndex}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${text}\n`;
     }).join("\n");
     await writeFile(subtitlePath, srt, "utf8");
   }
   const captionFontSize = Math.max(18, Math.min(72, Math.round(input.captionFontSize ?? 28)));
-  const captionFilter = input.burnCaptions ? `subtitles='${escapeFilterPath(subtitlePath)}':force_style='Fontsize=${captionFontSize},PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=8,MarginV=36'` : null;
+  const captionFilter = input.burnCaptions && hasSubtitleEntries ? `subtitles='${escapeFilterPath(subtitlePath)}':force_style='FontName=Helvetica,Fontsize=${captionFontSize},PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=1,Outline=2,Shadow=1,Alignment=2,MarginV=70'` : null;
   await runCommand("ffmpeg", [
     "-y",
     ...ffmpegProgressArgs(),

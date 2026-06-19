@@ -7,6 +7,11 @@ export async function probeDurationSeconds(inputPath: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+export async function probeHasAudio(inputPath: string) {
+  const { stdout } = await runCommand("ffprobe", ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1", inputPath]);
+  return stdout.trim().split(/\s+/).includes("audio");
+}
+
 export function createClipPlan(durationSeconds: number, markers: VideoRow["markers"]): ClipPlanItem[] {
   const safeDuration = Math.max(1, durationSeconds || 1);
   const normalizedMarkers = (markers ?? [])

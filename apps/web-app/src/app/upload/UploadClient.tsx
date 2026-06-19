@@ -20,7 +20,7 @@ type DuplicateSummary = {
 type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null; duplicate_of_video_id?: string | null }; duplicate?: DuplicateSummary | null };
 type PackageMode = "fast" | "high_quality";
 type PackageJobResponse = { job_id: string; status: string };
-type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
+type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; completed_at?: string | null; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
 type PackageOptions = {
   includeMaster: boolean;
@@ -159,6 +159,18 @@ function formatStageElapsed(value: unknown) {
   return `${minutes}m ${seconds}s`;
 }
 
+function formatElapsedBetween(startValue: unknown, endValue: unknown) {
+  if (typeof startValue !== "string" || typeof endValue !== "string") return "";
+  const startedAt = new Date(startValue).getTime();
+  const endedAt = new Date(endValue).getTime();
+  if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt)) return "";
+  const elapsedSeconds = Math.max(0, Math.floor((endedAt - startedAt) / 1000));
+  if (elapsedSeconds < 60) return `${elapsedSeconds}s`;
+  const minutes = Math.floor(elapsedSeconds / 60);
+  const seconds = elapsedSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
 function numberFromOutput(output: Record<string, unknown> | undefined, key: string) {
   const value = output?.[key];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
@@ -259,8 +271,8 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   const progress = Math.min(100, Math.max(0, Number(job?.progress ?? 0)));
   const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));
   const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";
-  const elapsed = formatStageElapsed(job?.output?.stageUpdatedAt);
-  const totalElapsed = formatStageElapsed(job?.created_at ?? job?.output?.stageUpdatedAt);
+  const elapsed = job?.status === "processing" ? formatStageElapsed(job?.output?.stageUpdatedAt) : "";
+  const totalElapsed = job?.status === "completed" ? formatElapsedBetween(job?.created_at, job?.completed_at) : formatStageElapsed(job?.created_at ?? job?.output?.stageUpdatedAt);
   const activeStageProgress = numberFromOutput(job?.output, "stageProgressPercent");
   const itemLabel = typeof job?.output?.itemLabel === "string" ? job.output.itemLabel : "";
   const itemIndex = numberFromOutput(job?.output, "itemIndex");
@@ -268,7 +280,7 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
   const note = slowStageNotes[stage];
   return <div className="card">
     <h3>Package Progress</h3>
-    <p className="muted">Total time passed: {totalElapsed || "not started"}</p>
+    <p className="muted">{job?.status === "completed" ? "Total processing time" : "Total time passed"}: {totalElapsed || "not started"}</p>
     <p className={statusClass}>{job?.status ?? "not started"} · {stage.replaceAll("_", " ")} · {progress}%{elapsed ? ` · running ${elapsed}` : ""}</p>
     {activeStageProgress !== null && job?.status === "processing" && <p className="status">Current step: {activeStageProgress}%{itemLabel ? ` · ${itemLabel}` : ""}{itemIndex && itemTotal ? ` (${itemIndex}/${itemTotal})` : ""}</p>}
     {note && job?.status === "processing" && <p className="muted">{note}</p>}
