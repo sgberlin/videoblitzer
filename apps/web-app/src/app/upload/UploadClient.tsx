@@ -47,8 +47,13 @@ type SavedUploadSession = {
   status?: string;
   packageStatus?: string;
 };
+type ArchivedUploadSession = SavedUploadSession & {
+  archiveId: string;
+  label: string;
+};
 
 const savedUploadSessionKey = "videoblitzer.upload.resume.v1";
+const archivedUploadSessionsKey = "videoblitzer.upload.archives.v1";
 
 const packageStages = [
   { key: "queued", label: "Queued", start: 0, end: 15 },
@@ -159,6 +164,35 @@ function saveUploadSession(session: SavedUploadSession | null) {
     return;
   }
   window.localStorage.setItem(savedUploadSessionKey, JSON.stringify({ ...session, savedAt: new Date().toISOString() }));
+}
+
+function loadArchivedUploadSessions() {
+  if (typeof window === "undefined") return [];
+  try {
+    const raw = window.localStorage.getItem(archivedUploadSessionsKey);
+    const parsed = raw ? JSON.parse(raw) as ArchivedUploadSession[] : [];
+    return Array.isArray(parsed) ? parsed.filter((item) => item.archiveId && item.uploadedVideo?.id).slice(0, 20) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveArchivedUploadSessions(sessions: ArchivedUploadSession[]) {
+  if (typeof window === "undefined") return;
+  window.localStorage.setItem(archivedUploadSessionsKey, JSON.stringify(sessions.slice(0, 20)));
+}
+
+function archiveUploadSession(session: SavedUploadSession) {
+  const archive: ArchivedUploadSession = {
+    ...session,
+    archiveId: `${Date.now()}-${session.uploadedVideo.id}`,
+    savedAt: new Date().toISOString(),
+    label: `${session.uploadedVideo.filename ?? "Uploaded video"} · ${session.packageJob?.status ?? "saved"}`,
+  };
+  const existing = loadArchivedUploadSessions().filter((item) => item.uploadedVideo.id !== session.uploadedVideo.id || item.packageJob?.id !== session.packageJob?.id);
+  const next = [archive, ...existing].slice(0, 20);
+  saveArchivedUploadSessions(next);
+  return next;
 }
 
 function duplicateFromStatus(response: DuplicateStatusResponse): DuplicateSummary | null {
@@ -300,6 +334,7 @@ export function UploadClient() {
   const [packageBusy, setPackageBusy] = useState(false);
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
+  const [archivedSessions, setArchivedSessions] = useState<ArchivedUploadSession[]>([]);
   const auth = useAuthSession();
 
   function persistCurrentSession(patch: Partial<SavedUploadSession> = {}) {
@@ -337,6 +372,7 @@ export function UploadClient() {
           setStatus(error.message.toLowerCase() === "unauthorized" ? "Your sign-in was created, but the API could not verify it yet. Please refresh once." : "Sign in to load existing projects, or create a new project during upload.");
         }
       });
+    setArchivedSessions(loadArchivedUploadSessions());
   }, [auth.email, auth.session?.access_token, auth.status]);
 
   useEffect(() => {
@@ -585,6 +621,49 @@ export function UploadClient() {
     setDuplicate(duplicateFromStatus(response));
   }
 
+  function restoreSavedSession(session: SavedUploadSession) {
+    setUploadedVideo(session.uploadedVideo);
+    setProjectUrl(session.projectUrl || `/projects/${session.uploadedVideo.project_id}/social-production`);
+    setPackageJob(session.packageJob ?? null);
+    setDuplicate(session.duplicate ?? null);
+    setProgress((current) => ({ ...current, percent: 100, state: "complete" }));
+    setStatus(session.status || "Restored archived work. You can continue from here.");
+    setPackageStatus(session.packageStatus || "Restored saved package state.");
+    saveUploadSession(session);
+    void refreshDuplicateStatus(session.uploadedVideo.id).catch(() => undefined);
+    if (session.packageJob?.id) void refreshPackageJob(session.packageJob.id).catch(() => undefined);
+  }
+
+  function clearCurrentWork() {
+    const saved = uploadedVideo ? {
+      savedAt: new Date().toISOString(),
+      projectUrl: projectUrl || `/projects/${uploadedVideo.project_id}/social-production`,
+      uploadedVideo,
+      packageJob,
+      duplicate,
+      status,
+      packageStatus,
+    } satisfies SavedUploadSession : loadSavedUploadSession();
+    const shouldClear = window.confirm("Clear this page's current upload/package state? VideoBlitzer will archive it first, and the server project/package will not be deleted.");
+    if (!shouldClear) return;
+    if (saved) setArchivedSessions(archiveUploadSession(saved));
+    saveUploadSession(null);
+    setUploadedVideo(null);
+    setDuplicate(null);
+    setPackageJob(null);
+    setPackageStatus("");
+    setProjectUrl("");
+    setProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
+    setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
+    setStatus(saved ? "Cleared this page and archived the work below. You can restore it anytime." : "Cleared this page.");
+  }
+
+  function removeArchivedSession(archiveId: string) {
+    const next = archivedSessions.filter((session) => session.archiveId !== archiveId);
+    saveArchivedUploadSessions(next);
+    setArchivedSessions(next);
+  }
+
   async function downloadPackageZip() {
     if (!auth.session?.access_token || !packageJob?.id) return;
     setDownloadBusy(true);
@@ -662,6 +741,18 @@ export function UploadClient() {
         {uploadedVideo && <p className="status">Current work is saved. You can refresh and continue from this package state.</p>}
         <PackageProgressPanel job={packageJob} onDownload={() => void downloadPackageZip()} downloadBusy={downloadBusy} />
         {projectUrl && <p><a className="button secondary" href={projectUrl}>Open Social Media Production</a></p>}
+        {(uploadedVideo || packageJob) && <button className="button secondary" onClick={clearCurrentWork}>Clear Current Page State</button>}
+        <p className="muted">Clear only resets this page. It archives the work first and does not delete the server project, video, package job, or ZIP.</p>
+        <div className="card">
+          <h3>Archived Work</h3>
+          {archivedSessions.length ? archivedSessions.map((session) => <div className="card" key={session.archiveId}>
+            <strong>{session.label}</strong>
+            <p className="muted">Saved {new Date(session.savedAt).toLocaleString()} · Project {session.uploadedVideo.project_id.slice(0, 8)} · Package {session.packageJob?.id ? session.packageJob.id.slice(0, 8) : "not started"}</p>
+            <button className="button secondary" onClick={() => restoreSavedSession(session)}>Restore Here</button>
+            {session.projectUrl && <a className="button secondary" href={session.projectUrl}>Open Project</a>}
+            <button className="button secondary" onClick={() => removeArchivedSession(session.archiveId)}>Remove Archive</button>
+          </div>) : <p className="muted">No archived upload work in this browser yet.</p>}
+        </div>
       </div>
     </div>
   </section>;
