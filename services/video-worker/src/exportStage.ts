@@ -1,5 +1,5 @@
 import { exportPresets, type ExportPreset } from "@videoblitzer/export-presets";
-import { mkdir } from "node:fs/promises";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { runCommand, type CommandProgress } from "./packageCommand";
 import { uploadFileToR2 } from "./packageStorage";
@@ -17,6 +17,11 @@ const socialClipFormats = [
   { id: "square_social", label: "Square Social", platform: "social_square", folder: "square_1x1", width: 1080, height: 1080, aspectRatio: "1:1" },
 ] as const;
 const fastSocialClipFormatIds = new Set(["instagram_reels", "youtube_standard", "square_social"]);
+const outputFormatIds: Record<string, Set<string>> = {
+  vertical: new Set(["instagram_reels", "tiktok", "youtube_shorts", "facebook_reels"]),
+  landscape: new Set(["youtube_standard"]),
+  square: new Set(["square_social"]),
+};
 
 export function selectPackagePresets(requestedPresetIds: string[] = []) {
   const ids = requestedPresetIds.length ? requestedPresetIds : defaultPresetIds;
@@ -128,14 +133,26 @@ export async function renderPresetExport(inputPath: string, outputPath: string, 
   ], { timeoutMs: ffmpegTimeoutMs, progressDurationSeconds: durationSeconds ?? undefined, onProgress });
 }
 
-function clipFilter(width: number, height: number) {
+function escapeDrawText(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'").replace(/%/g, "\\%").replace(/\[/g, "\\[").replace(/\]/g, "\\]");
+}
+
+function clipFilter(width: number, height: number, options: { subtleZoom?: boolean; caption?: string | null } = {}) {
+  const zoom = options.subtleZoom ? 1.08 : 1;
+  const captionFilter = options.caption
+    ? `,drawtext=text='${escapeDrawText(options.caption)}':x=(w-text_w)/2:y=h-(text_h*3):fontsize=${height >= 1800 ? 54 : 38}:fontcolor=white:box=1:boxcolor=black@0.55:boxborderw=18`
+    : "";
   if (width === 1080 && height === 1920) {
-    return "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,unsharp=5:5:0.35";
+    const scaledWidth = Math.round(1080 * zoom);
+    const scaledHeight = Math.round(1920 * zoom);
+    return `scale=${scaledWidth}:${scaledHeight}:force_original_aspect_ratio=increase,crop=1080:1920,unsharp=5:5:0.35${captionFilter}`;
   }
   if (width === 1080 && height === 1080) {
-    return "scale=1080:1080:force_original_aspect_ratio=increase,crop=1080:1080,unsharp=5:5:0.25";
+    const scaled = Math.round(1080 * zoom);
+    return `scale=${scaled}:${scaled}:force_original_aspect_ratio=increase,crop=1080:1080,unsharp=5:5:0.25${captionFilter}`;
   }
-  return "scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,unsharp=5:5:0.25";
+  if (options.subtleZoom) return `scale=2074:1166:force_original_aspect_ratio=increase,crop=1920:1080,unsharp=5:5:0.25${captionFilter}`;
+  return `scale=1920:1080:force_original_aspect_ratio=decrease,pad=1920:1080:(ow-iw)/2:(oh-ih)/2,unsharp=5:5:0.25${captionFilter}`;
 }
 
 function safeName(value: string, maxLength = 80) {
@@ -160,8 +177,9 @@ async function runWithConcurrency<T>(items: T[], concurrency: number, worker: (i
   await Promise.all(workers);
 }
 
-export async function renderSocialClip(inputPath: string, outputPath: string, clip: ClipPlanItem, format: typeof socialClipFormats[number], hasAudio = true, onProgress?: ProgressReporter) {
+export async function renderSocialClip(inputPath: string, outputPath: string, clip: ClipPlanItem, format: typeof socialClipFormats[number], hasAudio = true, onProgress?: ProgressReporter, options: { subtleZoom?: boolean; burnCaption?: boolean } = {}) {
   const duration = Math.max(1, clip.endSeconds - clip.startSeconds);
+  const caption = options.burnCaption ? clip.note || clip.label : null;
   await runCommand("ffmpeg", [
     "-y",
     ...ffmpegProgressArgs(),
@@ -170,7 +188,7 @@ export async function renderSocialClip(inputPath: string, outputPath: string, cl
     "-i", inputPath,
     "-map", "0:v:0",
     ...(hasAudio ? ["-map", "0:a:0?"] : []),
-    "-vf", clipFilter(format.width, format.height),
+    "-vf", clipFilter(format.width, format.height, { subtleZoom: options.subtleZoom, caption }),
     ...(hasAudio ? ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
@@ -192,6 +210,47 @@ export async function renderThumbnail(inputPath: string, outputPath: string, cli
     "-vf", "scale=1280:-1",
     outputPath,
   ], { timeoutMs: Math.min(ffmpegTimeoutMs, 10 * 60 * 1000) });
+}
+
+function concatPath(value: string) {
+  return value.replace(/'/g, "'\\''");
+}
+
+export async function createFinalEdit(input: {
+  masterPath: string;
+  outputPath: string;
+  clipPlan: ClipPlanItem[];
+  workdir: string;
+  hasAudio?: boolean;
+  onProgress?: ProgressReporter;
+}) {
+  const editListPath = path.join(input.workdir, "final-edit.concat.txt");
+  const clips = input.clipPlan
+    .filter((clip) => Number.isFinite(clip.startSeconds) && Number.isFinite(clip.endSeconds) && clip.endSeconds > clip.startSeconds)
+    .sort((a, b) => a.startSeconds - b.startSeconds);
+  if (!clips.length) throw new Error("No clips are available for the final edited video.");
+  const concatList = clips
+    .map((clip) => `file '${concatPath(input.masterPath)}'\ninpoint ${clip.startSeconds.toFixed(3)}\noutpoint ${clip.endSeconds.toFixed(3)}`)
+    .join("\n");
+  const durationSeconds = clips.reduce((sum, clip) => sum + Math.max(0, clip.endSeconds - clip.startSeconds), 0);
+  await writeFile(editListPath, `${concatList}\n`, "utf8");
+  await runCommand("ffmpeg", [
+    "-y",
+    ...ffmpegProgressArgs(),
+    "-f", "concat",
+    "-safe", "0",
+    "-i", editListPath,
+    "-map", "0:v:0",
+    ...(input.hasAudio ? ["-map", "0:a:0?"] : []),
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-crf", "21",
+    "-pix_fmt", "yuv420p",
+    ...audioArgs(input.hasAudio ?? true, "192k"),
+    "-movflags", "+faststart",
+    input.outputPath,
+  ], { timeoutMs: ffmpegTimeoutMs, progressDurationSeconds: durationSeconds, onProgress: input.onProgress });
+  return { durationSeconds };
 }
 
 export async function exportStage(input: {
@@ -252,13 +311,18 @@ export async function socialClipStage(input: {
   onProgress?: ProgressReporter;
   fastMode?: boolean;
   clipRenderConcurrency?: number;
+  outputs?: string[];
+  subtleZoom?: boolean;
+  burnCaptions?: boolean;
 }) {
   const clipArtifacts: Array<ExportArtifact & { filePath: string }> = [];
   const thumbnailArtifacts: Array<ExportArtifact & { filePath: string }> = [];
   type ClipRenderTask = { clip: ClipPlanItem; format: typeof socialClipFormats[number]; duration: number; durationLabel: string; titleSlug: string };
 
+  const allowedFormatIds = new Set((input.outputs?.length ? input.outputs : ["vertical", "landscape", "square"]).flatMap((output) => [...(outputFormatIds[output] ?? new Set<string>())]));
+  const formatAllowed = (format: typeof socialClipFormats[number]) => allowedFormatIds.size === 0 || allowedFormatIds.has(format.id);
   const totalRenders = input.clipPlan.reduce((sum, clip) => {
-    const formats = socialClipFormats.filter((format) => input.fastMode ? fastSocialClipFormatIds.has(format.id) : clip.platformFit.includes(format.platform) || format.platform === "youtube_standard" || format.platform === "social_square");
+    const formats = socialClipFormats.filter((format) => formatAllowed(format) && (input.fastMode ? fastSocialClipFormatIds.has(format.id) : clip.platformFit.includes(format.platform) || format.platform === "youtube_standard" || format.platform === "social_square"));
     return sum + formats.length;
   }, 0);
   let completedRenders = 0;
@@ -268,7 +332,7 @@ export async function socialClipStage(input: {
     const duration = Math.max(1, clip.endSeconds - clip.startSeconds);
     const durationLabel = `${Math.round(duration)}s`;
     const titleSlug = safeName(clip.label);
-    const formats = socialClipFormats.filter((format) => input.fastMode ? fastSocialClipFormatIds.has(format.id) : clip.platformFit.includes(format.platform) || format.platform === "youtube_standard" || format.platform === "social_square");
+    const formats = socialClipFormats.filter((format) => formatAllowed(format) && (input.fastMode ? fastSocialClipFormatIds.has(format.id) : clip.platformFit.includes(format.platform) || format.platform === "youtube_standard" || format.platform === "social_square"));
     renderTasks.push(...formats.map((format) => ({ clip, format, duration, durationLabel, titleSlug })));
 
     const thumbnailDir = path.join(input.workdir, "thumbnails");
@@ -309,7 +373,7 @@ export async function socialClipStage(input: {
       label: `${format.label} ${clip.label}`,
       current: renderIndex + 1,
       total: totalRenders,
-    }));
+    }), { subtleZoom: input.subtleZoom, burnCaption: input.burnCaptions });
     const objectKey = `packages/assets/${input.userId}/${input.projectId}/${input.packageJobId}/clips/${format.folder}/${fileName}`;
     await uploadFileToR2(filePath, objectKey, "video/mp4");
     clipArtifacts.push({

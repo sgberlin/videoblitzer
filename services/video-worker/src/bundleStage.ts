@@ -17,7 +17,7 @@ export async function createPackageZip(input: {
   clipPlanPath: string;
   manifestPath: string;
   readmePath: string;
-  normalizedMasterPath: string;
+  normalizedMasterPath?: string;
   exports: ExportArtifactWithPath[];
   assets: ExportArtifactWithPath[];
 }) {
@@ -33,7 +33,7 @@ export async function createPackageZip(input: {
     output.on("error", reject);
     archive.on("error", reject);
     archive.pipe(output);
-    archive.file(input.normalizedMasterPath, { name: `master/${input.manifest.normalizedMaster.fileName}` });
+    if (input.normalizedMasterPath) archive.file(input.normalizedMasterPath, { name: `master/${input.manifest.normalizedMaster.fileName}` });
     for (const artifact of input.exports) {
       archive.file(artifact.filePath, { name: `clips/landscape_16x9/${artifact.fileName}` });
     }
@@ -51,7 +51,7 @@ export async function createPackageZip(input: {
 export async function bundleStage(input: {
   workdir: string;
   manifest: PackageManifest;
-  normalizedMasterPath: string;
+  normalizedMasterPath?: string;
   exports: ExportArtifactWithPath[];
   assets: ExportArtifactWithPath[];
   readmeText: string;

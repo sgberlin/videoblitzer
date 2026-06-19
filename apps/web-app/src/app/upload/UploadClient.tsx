@@ -23,6 +23,21 @@ type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "
 type PackageJobResponse = { job_id: string; status: string };
 type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
+type PackageOptions = {
+  includeMaster: boolean;
+  includeGoalClips: boolean;
+  includeKeyMoments: boolean;
+  useMatchData: boolean;
+  includeCaptions: boolean;
+  burnCaptions: boolean;
+  subtleZoom: boolean;
+  outputs: Array<"vertical" | "landscape" | "square">;
+  goalRunupSeconds: number;
+  videoKickoffSecond: number;
+  secondHalfKickoffSecond?: number;
+  matchLookup?: { teamA?: string; teamB?: string; league?: string; matchDate?: string };
+};
+type MatchTimelineResponse = { events?: Array<Record<string, unknown>>; fixture?: unknown; stats?: unknown; outputs?: unknown; warning?: string | null; provider?: string; attribution?: string; complianceNote?: string };
 type DuplicateStatusResponse = {
   duplicateDetected?: boolean;
   duplicateOfVideoId?: string | null;
@@ -54,12 +69,25 @@ type ArchivedUploadSession = SavedUploadSession & {
 
 const savedUploadSessionKey = "videoblitzer.upload.resume.v1";
 const archivedUploadSessionsKey = "videoblitzer.upload.archives.v1";
+const defaultPackageOptions: PackageOptions = {
+  includeMaster: true,
+  includeGoalClips: true,
+  includeKeyMoments: true,
+  useMatchData: true,
+  includeCaptions: true,
+  burnCaptions: false,
+  subtleZoom: true,
+  outputs: ["vertical", "landscape", "square"],
+  goalRunupSeconds: 75,
+  videoKickoffSecond: 0,
+};
 
 const packageStages = [
   { key: "queued", label: "Queued", start: 0, end: 15 },
   { key: "download_source", label: "Downloading source media", start: 15, end: 25 },
   { key: "normalize_master", label: "Merging and normalizing media", start: 25, end: 40 },
   { key: "analyze", label: "Detecting highlights", start: 40, end: 55 },
+  { key: "final_edit", label: "Building condensed final video", start: 50, end: 55 },
   { key: "rendering_clips", label: "Creating social clips", start: 55, end: 70 },
   { key: "preset_exports", label: "Creating export presets", start: 70, end: 82 },
   { key: "validating_assets", label: "Validating generated assets", start: 82, end: 90 },
@@ -69,6 +97,7 @@ const packageStages = [
 
 const slowStageNotes: Record<string, string> = {
   normalize_master: "This is usually the slowest first step because FFmpeg is rebuilding the full master video and replacing/normalizing audio.",
+  final_edit: "This creates the condensed final video from goals, key moments, and context sequences.",
   rendering_clips: "This can take time because each social clip is rendered into multiple platform sizes.",
   preset_exports: "This can take time because full export presets are being encoded.",
   building_zip: "Large packages take longer while files are collected and compressed.",
@@ -335,6 +364,11 @@ export function UploadClient() {
   const [downloadBusy, setDownloadBusy] = useState(false);
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const [archivedSessions, setArchivedSessions] = useState<ArchivedUploadSession[]>([]);
+  const [packageOptions, setPackageOptions] = useState<PackageOptions>(defaultPackageOptions);
+  const [matchTeamA, setMatchTeamA] = useState("");
+  const [matchTeamB, setMatchTeamB] = useState("");
+  const [matchLeague, setMatchLeague] = useState("");
+  const [matchDate, setMatchDate] = useState("");
   const auth = useAuthSession();
 
   function persistCurrentSession(patch: Partial<SavedUploadSession> = {}) {
@@ -514,14 +548,79 @@ export function UploadClient() {
     }
   }
 
+  function toggleOutput(output: PackageOptions["outputs"][number], checked: boolean) {
+    setPackageOptions((current) => {
+      const outputs = checked ? [...new Set([...current.outputs, output])] : current.outputs.filter((item) => item !== output);
+      return { ...current, outputs: outputs.length ? outputs : current.outputs };
+    });
+  }
+
+  function buildPackageOptions(): PackageOptions {
+    const matchLookup = {
+      teamA: matchTeamA.trim() || undefined,
+      teamB: matchTeamB.trim() || undefined,
+      league: matchLeague.trim() || undefined,
+      matchDate: matchDate || undefined,
+    };
+    return {
+      ...packageOptions,
+      goalRunupSeconds: Math.max(60, Number(packageOptions.goalRunupSeconds) || 75),
+      videoKickoffSecond: Math.max(0, Number(packageOptions.videoKickoffSecond) || 0),
+      secondHalfKickoffSecond: packageOptions.secondHalfKickoffSecond === undefined ? undefined : Math.max(0, Number(packageOptions.secondHalfKickoffSecond) || 0),
+      matchLookup: matchLookup.teamA && matchLookup.teamB && matchLookup.matchDate ? matchLookup : undefined,
+    };
+  }
+
+  async function confirmMatchDataForPackage(projectId: string, options: PackageOptions) {
+    if (!auth.session?.access_token || !options.useMatchData || !options.matchLookup) return null;
+    setPackageStatus("Retrieving match timeline before queueing package...");
+    const timeline = await apiFetch<MatchTimelineResponse>("/match-intelligence/timeline", {
+      method: "POST",
+      body: JSON.stringify({
+        sport: "Soccer",
+        provider: "API-Football",
+        teamA: options.matchLookup.teamA,
+        teamB: options.matchLookup.teamB,
+        league: options.matchLookup.league,
+        matchDate: options.matchLookup.matchDate,
+      }),
+    }, auth.session.access_token);
+    if (!timeline.events?.length) {
+      setPackageStatus(timeline.warning || "No provider match events found. The worker will use any confirmed match data already saved, then fallback candidates.");
+      return timeline;
+    }
+    await apiFetch("/match-data/confirm", {
+      method: "POST",
+      body: JSON.stringify({
+        projectId,
+        data: {
+          source: "upload_package_options",
+          provider: timeline.provider,
+          attribution: timeline.attribution,
+          complianceNote: timeline.complianceNote,
+          fixture: timeline.fixture,
+          stats: timeline.stats,
+          events: timeline.events,
+          outputs: timeline.outputs,
+          matchLookup: options.matchLookup,
+          confirmedAt: new Date().toISOString(),
+        },
+      }),
+    }, auth.session.access_token);
+    setPackageStatus(`Confirmed ${timeline.events.length} match events for clipping.`);
+    return timeline;
+  }
+
   async function producePackage(packageMode: PackageMode) {
     if (!auth.session?.access_token || !uploadedVideo) return;
     setPackageBusy(true);
     setPackageStatus("");
     try {
+      const options = buildPackageOptions();
+      await confirmMatchDataForPackage(uploadedVideo.project_id, options);
       const response = await apiFetch<PackageJobResponse>("/packages/generate", {
         method: "POST",
-        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode }),
+        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode, packageOptions: options }),
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}. Processing has started.`);
@@ -558,9 +657,11 @@ export function UploadClient() {
     if (!auth.session?.access_token || !uploadedVideo) return;
     setPackageBusy(true);
     try {
+      const options = buildPackageOptions();
+      await confirmMatchDataForPackage(uploadedVideo.project_id, options);
       const response = await apiFetch<PackageJobResponse>("/packages/generate-alternative", {
         method: "POST",
-        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode: "fast", packageVariant: variant }),
+        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode: "fast", packageVariant: variant, packageOptions: options }),
       }, auth.session.access_token);
       setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
       setPackageStatus(`Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.`);
@@ -580,6 +681,8 @@ export function UploadClient() {
     const includeCaptions = window.confirm("Include captions?");
     setPackageBusy(true);
     try {
+      const options = buildPackageOptions();
+      await confirmMatchDataForPackage(uploadedVideo.project_id, { ...options, includeCaptions });
       const response = await apiFetch<PackageJobResponse>("/packages/generate-custom", {
         method: "POST",
         body: JSON.stringify({
@@ -587,6 +690,7 @@ export function UploadClient() {
           videoId: uploadedVideo.id,
           packageMode: "fast",
           packageOptions: {
+            ...options,
             targetPlatform,
             tonePreset: "high_energy",
             clipDurationPreference: "short",
@@ -729,6 +833,34 @@ export function UploadClient() {
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
           {audioFile && <p className="status">Separate audio uploaded. The package worker will replace the video's original audio with this track before creating clips and exports.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
+          <div className="card">
+            <h3>Package Options</h3>
+            <label><input type="checkbox" checked={packageOptions.includeMaster} onChange={(event) => setPackageOptions((current) => ({ ...current, includeMaster: event.target.checked }))} /> Master video</label><br />
+            <label><input type="checkbox" checked={packageOptions.useMatchData} onChange={(event) => setPackageOptions((current) => ({ ...current, useMatchData: event.target.checked }))} /> Use match data for clip timing</label><br />
+            <label><input type="checkbox" checked={packageOptions.includeGoalClips} onChange={(event) => setPackageOptions((current) => ({ ...current, includeGoalClips: event.target.checked }))} /> Goal clips with buildup</label><br />
+            <label><input type="checkbox" checked={packageOptions.includeKeyMoments} onChange={(event) => setPackageOptions((current) => ({ ...current, includeKeyMoments: event.target.checked }))} /> Other key moments</label><br />
+            <label><input type="checkbox" checked={packageOptions.outputs.includes("vertical")} onChange={(event) => toggleOutput("vertical", event.target.checked)} /> Vertical clips</label><br />
+            <label><input type="checkbox" checked={packageOptions.outputs.includes("landscape")} onChange={(event) => toggleOutput("landscape", event.target.checked)} /> Landscape clips</label><br />
+            <label><input type="checkbox" checked={packageOptions.outputs.includes("square")} onChange={(event) => toggleOutput("square", event.target.checked)} /> Square clips</label><br />
+            <label><input type="checkbox" checked={packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, includeCaptions: event.target.checked, burnCaptions: event.target.checked ? current.burnCaptions : false }))} /> Captions</label><br />
+            <label><input type="checkbox" checked={packageOptions.burnCaptions} disabled={!packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, burnCaptions: event.target.checked }))} /> Burn captions into clips</label><br />
+            <label><input type="checkbox" checked={packageOptions.subtleZoom} onChange={(event) => setPackageOptions((current) => ({ ...current, subtleZoom: event.target.checked }))} /> Subtle zoom/crop</label>
+            <br /><br />
+            <label>Goal buildup seconds</label>
+            <input className="input" type="number" min={60} value={packageOptions.goalRunupSeconds} onChange={(event) => setPackageOptions((current) => ({ ...current, goalRunupSeconds: Number(event.target.value) }))} />
+            <br /><br />
+            <label>Match lookup for event timing</label>
+            <div className="grid grid-2">
+              <input className="input" value={matchTeamA} onChange={(event) => setMatchTeamA(event.target.value)} placeholder="Team A" />
+              <input className="input" value={matchTeamB} onChange={(event) => setMatchTeamB(event.target.value)} placeholder="Team B" />
+              <input className="input" value={matchLeague} onChange={(event) => setMatchLeague(event.target.value)} placeholder="League (optional)" />
+              <input className="input" type="date" value={matchDate} onChange={(event) => setMatchDate(event.target.value)} />
+            </div>
+            <br />
+            <label>Video kickoff second</label>
+            <input className="input" type="number" min={0} value={packageOptions.videoKickoffSecond} onChange={(event) => setPackageOptions((current) => ({ ...current, videoKickoffSecond: Number(event.target.value) }))} />
+            <p className="muted">If the video starts before kickoff, set the video second where match time 0:00 begins. Add match teams/date to fetch factual event minutes before package creation.</p>
+          </div>
           <button className="button" onClick={() => void producePackage("fast")} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Fast Package"}</button>
           <button className="button secondary" onClick={() => void producePackage("high_quality")} disabled={packageBusy || uploadedVideo.has_video !== true}>High Quality Package</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}

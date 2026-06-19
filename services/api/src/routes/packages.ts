@@ -250,7 +250,7 @@ async function queuePackageFromInput(input: {
     audioSourceContentType: video.audio_source_content_type,
     audioSourceSizeBytes: video.audio_source_size_bytes,
     audioSourceMetadata: video.audio_source_metadata,
-    presetIds: input.presetIds ?? ["youtube_16_9_1080p", "shorts_9_16_1080x1920", "square_1_1_1080"],
+    presetIds: input.presetIds ?? [],
     includeClipPlan: input.includeClipPlan,
     packageMode: input.packageMode,
     packageVariant: input.packageVariant,
