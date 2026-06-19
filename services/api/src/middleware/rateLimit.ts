@@ -3,7 +3,10 @@ import { RedisStore } from "rate-limit-redis";
 import { createClient } from "redis";
 import { config } from "../config";
 
-let redisStore: RedisStore | undefined;
+type RedisStoreOptions = ConstructorParameters<typeof RedisStore>[0];
+type RedisSendCommand = Extract<RedisStoreOptions, { sendCommand: unknown }>["sendCommand"];
+
+let sendRedisCommand: RedisSendCommand | undefined;
 const isProduction = config.NODE_ENV === "production";
 
 if (!config.REDIS_URL && isProduction) {
@@ -17,13 +20,17 @@ if (config.REDIS_URL) {
     console.error("[rate-limit] redis connection failed", message);
     if (isProduction) process.exit(1);
   });
-  redisStore = new RedisStore({ sendCommand: (...args: string[]) => client.sendCommand(args) });
+  sendRedisCommand = (...args: string[]) => client.sendCommand(args);
 }
 
-function limiter(limit: number) {
-  return rateLimit({ windowMs: 15 * 60 * 1000, limit, standardHeaders: true, legacyHeaders: false, store: redisStore });
+function redisStore(prefix: string) {
+  return sendRedisCommand ? new RedisStore({ sendCommand: sendRedisCommand, prefix }) : undefined;
 }
 
-export const contactRateLimit = limiter(5);
-export const uploadRateLimit = limiter(30);
-export const jobRateLimit = limiter(40);
+function limiter(limit: number, prefix: string) {
+  return rateLimit({ windowMs: 15 * 60 * 1000, limit, standardHeaders: true, legacyHeaders: false, store: redisStore(prefix) });
+}
+
+export const contactRateLimit = limiter(5, "rl:contact:");
+export const uploadRateLimit = limiter(30, "rl:upload:");
+export const jobRateLimit = limiter(40, "rl:job:");
