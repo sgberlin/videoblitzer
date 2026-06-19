@@ -4,9 +4,8 @@ import { AI_SYSTEM_INSTRUCTION } from "@videoblitzer/prompts";
 import { thumbnailQualityChecklist, thumbnailTemplates } from "@videoblitzer/thumbnail-engine";
 
 export const generationRouter = Router();
-generationRouter.use(requireAuth);
 
-generationRouter.post("/social-pack/generate", (req, res) => {
+generationRouter.post("/social-pack/generate", requireAuth, (req, res) => {
   return res.json({
     systemInstruction: AI_SYSTEM_INSTRUCTION,
     package: {
@@ -25,6 +24,6 @@ generationRouter.post("/social-pack/generate", (req, res) => {
   });
 });
 
-generationRouter.post("/thumbnail/generate", (req, res) => {
+generationRouter.post("/thumbnail/generate", requireAuth, (req, res) => {
   return res.json({ templates: thumbnailTemplates, checklist: thumbnailQualityChecklist, identity: "Team colors + initials + player/game frames" });
 });

@@ -41,6 +41,8 @@ app.use((req, res, next) => {
 app.use(express.json({ limit: "1mb" }));
 
 app.get("/health", (_req, res) => res.json({ ok: true, service: "videoblitzer-api", product: config.APP_NAME }));
+app.get("/", (_req, res) => res.status(404).json({ error: "Not found", service: "videoblitzer-api" }));
+app.get("/robots.txt", (_req, res) => res.type("text/plain").send("User-agent: *\nDisallow: /\n"));
 app.use("/auth", authRouter);
 app.use("/dashboard", dashboardRouter);
 app.use("/downloads", downloadsRouter);
