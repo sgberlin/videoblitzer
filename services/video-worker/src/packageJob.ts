@@ -35,15 +35,20 @@ async function updatePackageState(
   patch: Record<string, unknown> = {},
 ) {
   const now = new Date().toISOString();
+  const safePatch = { ...patch };
+  if ("progress" in safePatch) {
+    const progress = Number(safePatch.progress);
+    safePatch.progress = Number.isFinite(progress) ? clampProgress(progress) : 0;
+  }
   const packagePatch = {
     status,
     updated_at: now,
     ...(status === "completed" ? { stage: "completed", stage_started_at: now } : {}),
-    locked_at: status === "processing" ? patch.locked_at ?? now : null,
-    worker_id: status === "processing" ? patch.worker_id ?? workerId : null,
-    last_heartbeat_at: status === "processing" ? now : patch.last_heartbeat_at ?? null,
+    locked_at: status === "processing" ? safePatch.locked_at ?? now : null,
+    worker_id: status === "processing" ? safePatch.worker_id ?? workerId : null,
+    last_heartbeat_at: status === "processing" ? now : safePatch.last_heartbeat_at ?? null,
     ...(status === "completed" ? { completed_at: now } : {}),
-    ...patch,
+    ...safePatch,
   };
   const { error: packageError } = await client.from("package_jobs").update(packagePatch).eq("id", jobId);
   if (packageError) throw new Error(packageError.message);
@@ -54,9 +59,9 @@ async function updatePackageState(
       status,
       updated_at: now,
       ...(status === "completed" ? { progress: 100 } : {}),
-      ...("error_message" in patch ? { error: patch.error_message } : {}),
-      ...("output" in patch ? { output: patch.output } : {}),
-      ...("progress" in patch ? { progress: patch.progress } : {}),
+      ...("error_message" in safePatch ? { error: safePatch.error_message } : {}),
+      ...("output" in safePatch ? { output: safePatch.output } : {}),
+      ...("progress" in safePatch ? { progress: safePatch.progress } : {}),
     })
     .eq("id", jobId);
   if (mirrorError) throw new Error(mirrorError.message);
@@ -79,7 +84,7 @@ async function markStage(client: WorkerClient, job: PackageJob, stage: string, p
 }
 
 function clampProgress(value: number) {
-  return Math.min(99, Math.max(0, Math.round(value)));
+  return Number.isFinite(value) ? Math.min(99, Math.max(0, Math.round(value))) : 0;
 }
 
 function stageProgressReporter(input: {
@@ -94,7 +99,8 @@ function stageProgressReporter(input: {
   let lastProgress = -1;
   return async (progress: { percent: number; seconds?: number; label?: string; current?: number; total?: number }) => {
     const nowMs = Date.now();
-    const stagePercent = Math.min(100, Math.max(0, Math.round(progress.percent)));
+    const rawStagePercent = Number(progress.percent);
+    const stagePercent = Number.isFinite(rawStagePercent) ? Math.min(100, Math.max(0, Math.round(rawStagePercent))) : 0;
     const overallProgress = Math.max(lastProgress, clampProgress(input.startProgress + ((input.endProgress - input.startProgress) * stagePercent) / 100));
     if (overallProgress === lastProgress && nowMs - lastUpdateAt < (input.throttleMs ?? 4000)) return;
     if (nowMs - lastUpdateAt < (input.throttleMs ?? 4000) && stagePercent < 100) return;
