@@ -239,6 +239,15 @@ function escapeSubtitleText(value: string) {
   return value.replace(/\r?\n/g, " ").replace(/[{}]/g, "").slice(0, 96);
 }
 
+function eventOverlayText(clip: ClipPlanItem) {
+  const note = clip.note?.trim();
+  const label = clip.label.trim();
+  if (note && !note.toLowerCase().includes(label.toLowerCase())) {
+    return `${label} - ${note}`;
+  }
+  return label || note || "Highlight";
+}
+
 function escapeFilterPath(value: string) {
   return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
 }
@@ -252,6 +261,7 @@ export async function createFinalEdit(input: {
   onProgress?: ProgressReporter;
   audioFilter?: string;
   burnCaptions?: boolean;
+  captionFontSize?: number;
 }) {
   const editListPath = path.join(input.workdir, "final-edit.concat.txt");
   const subtitlePath = path.join(input.workdir, `${path.basename(input.outputPath)}.srt`);
@@ -271,11 +281,12 @@ export async function createFinalEdit(input: {
       const start = cursor;
       const end = Math.min(cursor + duration, cursor + 7);
       cursor += duration;
-      return `${index + 1}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${escapeSubtitleText(clip.note || clip.label)}\n`;
+      return `${index + 1}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${escapeSubtitleText(eventOverlayText(clip))}\n`;
     }).join("\n");
     await writeFile(subtitlePath, srt, "utf8");
   }
-  const captionFilter = input.burnCaptions ? `subtitles='${escapeFilterPath(subtitlePath)}':force_style='Fontsize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=8,MarginV=36'` : null;
+  const captionFontSize = Math.max(18, Math.min(72, Math.round(input.captionFontSize ?? 28)));
+  const captionFilter = input.burnCaptions ? `subtitles='${escapeFilterPath(subtitlePath)}':force_style='Fontsize=${captionFontSize},PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=8,MarginV=36'` : null;
   await runCommand("ffmpeg", [
     "-y",
     ...ffmpegProgressArgs(),

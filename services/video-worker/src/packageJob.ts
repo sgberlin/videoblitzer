@@ -254,11 +254,23 @@ function clipPlanFromMatchEvents(events: MatchTimelineEvent[], durationSeconds: 
     .filter((clip) => clip.endSeconds > clip.startSeconds);
 }
 
+const finalEditMinimumSeconds = 15 * 60;
+const finalEditMaximumSeconds = 20 * 60;
+const verticalReelMaximumSeconds = 10 * 60;
+
+function clampDuration(value: number, minimum: number, maximum: number) {
+  return Math.min(maximum, Math.max(minimum, value));
+}
+
+function clipPlanDuration(clipPlan: PackageManifest["clipPlan"]) {
+  return clipPlan.reduce((sum, clip) => sum + Math.max(0, clip.endSeconds - clip.startSeconds), 0);
+}
+
 function finalEditTargetDuration(sourceDurationSeconds: number) {
   if (sourceDurationSeconds >= 75 * 60) return 18 * 60;
   if (sourceDurationSeconds >= 20 * 60) {
     const reduction = Math.min(4 * 60, Math.max(2 * 60, sourceDurationSeconds * 0.12));
-    return Math.max(60, sourceDurationSeconds - reduction);
+    return Math.min(sourceDurationSeconds, clampDuration(sourceDurationSeconds - reduction, finalEditMinimumSeconds, finalEditMaximumSeconds));
   }
   return Math.max(30, sourceDurationSeconds * 0.85);
 }
@@ -310,7 +322,9 @@ function createDurationFillers(input: { durationSeconds: number; existing: Packa
 
 function finalEditClipPlan(clipPlan: PackageManifest["clipPlan"], durationSeconds: number, options: Record<string, unknown>) {
   const explicitTarget = optionNumber(options, "finalVideoTargetSeconds", NaN);
-  const targetDuration = Number.isFinite(explicitTarget) ? Math.max(30, explicitTarget) : finalEditTargetDuration(durationSeconds);
+  const targetDuration = Number.isFinite(explicitTarget)
+    ? Math.min(durationSeconds, durationSeconds >= 20 * 60 ? clampDuration(explicitTarget, finalEditMinimumSeconds, finalEditMaximumSeconds) : Math.max(30, explicitTarget))
+    : finalEditTargetDuration(durationSeconds);
   const expanded = clipPlan.map((clip) => {
     const eventCenter = (clip.startSeconds + clip.endSeconds) / 2;
     const desiredDuration = durationSeconds >= 75 * 60 ? Math.max(75, Math.min(150, targetDuration / Math.max(6, clipPlan.length))) : Math.max(60, Math.min(240, targetDuration / Math.max(4, clipPlan.length)));
@@ -346,23 +360,33 @@ function isVerticalFallbackClip(clip: PackageManifest["clipPlan"][number]) {
   return text.includes("miss") || text.includes("big chance") || text.includes("shot on target") || text.includes("penalty") || text.includes("save");
 }
 
+function isClipPlanItem(clip: PackageManifest["clipPlan"][number] | null): clip is PackageManifest["clipPlan"][number] {
+  return clip !== null && clip.endSeconds > clip.startSeconds;
+}
+
 function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSeconds: number) {
   const goals = clipPlan.filter(isGoalClip);
   const source = goals.length ? goals : clipPlan.filter(isVerticalFallbackClip);
   const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, goals.length ? goals.length : 3);
+  let total = 0;
   return selected.map((clip, index) => {
     const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(120, (clip.endSeconds - clip.startSeconds) * 0.7)));
     const startSeconds = Math.max(0, center - 120);
-    const endSeconds = Math.min(durationSeconds, center + 60);
+    const plannedEndSeconds = Math.min(durationSeconds, center + 60);
+    const plannedDuration = Math.max(45, plannedEndSeconds - startSeconds);
+    const remaining = verticalReelMaximumSeconds - total;
+    if (remaining <= 0) return null;
+    const cappedDuration = Math.min(plannedDuration, remaining);
+    total += cappedDuration;
     return {
       ...clip,
       id: `vertical-reel-${index + 1}-${clip.id}`,
       startSeconds,
-      endSeconds: Math.max(endSeconds, Math.min(durationSeconds, startSeconds + 45)),
+      endSeconds: Math.min(durationSeconds, startSeconds + cappedDuration),
       reason: `${clip.reason} Included in the 9:16 goals/big-chance reel with action-safe framing.`,
       platformFit: ["instagram_reels", "tiktok", "youtube_shorts", "facebook_reels"],
     };
-  }).filter((clip) => clip.endSeconds > clip.startSeconds);
+  }).filter(isClipPlanItem);
 }
 
 function voiceModulationFilter(options: Record<string, unknown>) {
@@ -739,11 +763,12 @@ function srtTimestamp(seconds: number) {
 }
 
 function hookCaption(clip: PackageManifest["clipPlan"][number]) {
-  if (clip.confidence < 0.5) return "Candidate highlight - review before posting.";
-  if (clip.suggestedClipType === "quick_moment") return "Big moment. Watch this.";
-  if (clip.suggestedClipType === "short_highlight") return "Game-changing moment.";
-  if (clip.suggestedClipType === "story_highlight") return "Clean build-up. Strong finish.";
-  return "Full sequence from the match.";
+  const eventLabel = clip.label ? `${clip.label}. ` : "";
+  if (clip.confidence < 0.5) return `${eventLabel}Candidate highlight - review before posting.`;
+  if (clip.suggestedClipType === "quick_moment") return `${eventLabel}Big moment. Watch this.`;
+  if (clip.suggestedClipType === "short_highlight") return `${eventLabel}Game-changing moment.`;
+  if (clip.suggestedClipType === "story_highlight") return `${eventLabel}Clean build-up. Strong finish.`;
+  return `${eventLabel}Full sequence from the match.`;
 }
 
 async function createTextAssets(input: {
@@ -853,7 +878,8 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
 }
 
 function readmeForPackage(manifest: PackageManifest) {
-  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n\nQuality note:\nThe 16:9 edit prioritizes goals, penalties, big chances, red cards, VAR, saves, and late drama. The 9:16 edit is intentionally narrower and action-safe for goal/big-chance moments.\n`;
+  const formula = manifest.packageFormula ?? {};
+  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nPackage formula:\n- 16:9 highlights: goals, penalties, big chances, red cards, VAR, saves, and late drama; target ${formula.landscapeTargetSeconds ?? "15-20 min"} seconds; actual ${formula.landscapeActualSeconds ?? "unknown"} seconds.\n- 9:16 goal reel: goals only, or up to three big chances if no goals; max ${formula.verticalMaximumSeconds ?? verticalReelMaximumSeconds} seconds; actual ${formula.verticalActualSeconds ?? "unknown"} seconds.\n- Captions: assets ${formula.captionAssetsEnabled === false ? "off" : "on"}; embedded ${formula.embeddedCaptionsEnabled ? "on" : "off"}.\n- Voice modulation: ${formula.voiceModulation ? "5% pitch deviation" : "off"}.\n- Vertical framing: action-safe full-field foreground over blurred vertical background.\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n`;
 }
 
 async function processPackageJob(client: WorkerClient, job: PackageJob) {
@@ -972,6 +998,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       onProgress: reportFinalEditProgress,
       audioFilter: voiceFilter,
       burnCaptions,
+      captionFontSize: 28,
     }));
 
     const verticalClipPlan = verticalReelClipPlan(analysis.clipPlan, analysis.durationSeconds);
@@ -986,6 +1013,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       onProgress: reportClipProgress,
       audioFilter: voiceFilter,
       burnCaptions,
+      captionFontSize: 44,
     }));
 
     await markStage(client, job, "preset_exports", 70, { exportPlan: "one 16:9 highlights video and one 9:16 goals reel" });
@@ -1029,6 +1057,24 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     await persistPackageAssets(client, job, validatedAssets.map(({ filePath: _filePath, ...asset }) => asset));
 
     await markStage(client, job, "building_zip", 90, { assetCount: validatedAssets.length });
+    const packageFormula = {
+      landscapeContent: "16:9 highlights with goals, penalties, big chances, red cards, VAR, saves, and late drama.",
+      landscapeTargetSeconds: finalEditTargetSeconds,
+      landscapePlannedSeconds: clipPlanDuration(editClipPlan),
+      landscapeActualSeconds: finalEdit.durationSeconds,
+      landscapeClipCount: editClipPlan.length,
+      verticalContent: "9:16 goals only, falling back to up to three big chances if no goals are present.",
+      verticalMaximumSeconds: verticalReelMaximumSeconds,
+      verticalPlannedSeconds: clipPlanDuration(verticalClipPlan),
+      verticalActualSeconds: verticalEdit.durationSeconds,
+      verticalClipCount: verticalClipPlan.length,
+      verticalFraming: "action-safe full-field foreground over blurred vertical background",
+      captionAssetsEnabled: includeCaptions,
+      embeddedCaptionsEnabled: burnCaptions,
+      voiceModulation: Boolean(voiceFilter),
+      voicePitchDeviationPercent: voiceFilter ? 5 : 0,
+      includeMaster,
+    };
     const manifest: PackageManifest = {
       packageJobId: job.id,
       projectId: job.project_id,
@@ -1041,6 +1087,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       analysisId,
       reuseAnalysis: reusedAnalysisForClipPlan,
       packageOptions: options,
+      packageFormula,
       analysis: { durationSeconds: analysis.durationSeconds },
       normalizedMaster: { objectKey: masterObjectKey, fileName: "normalized-master.mp4" },
       clipPlan: analysis.clipPlan,
@@ -1088,6 +1135,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       includeMaster,
       finalEditDurationSeconds: finalEdit.durationSeconds,
       finalEditTargetSeconds,
+      packageFormula,
       finalEditClipCount: editClipPlan.length,
       verticalEditDurationSeconds: verticalEdit.durationSeconds,
       verticalEditClipCount: verticalClipPlan.length,

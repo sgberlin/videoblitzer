@@ -95,6 +95,7 @@ export type PackageManifest = {
   analysisId?: string | null;
   reuseAnalysis?: boolean;
   packageOptions?: Record<string, unknown>;
+  packageFormula?: Record<string, unknown>;
   analysis: Pick<AnalysisResult, "durationSeconds">;
   normalizedMaster: {
     objectKey: string;
