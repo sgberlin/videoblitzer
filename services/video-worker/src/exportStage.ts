@@ -32,6 +32,9 @@ function filterForPreset(preset: ExportPreset) {
   if (preset.aspectRatio === "source") {
     return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2`;
   }
+  if (preset.aspectRatio === "9:16") {
+    return "split=2[bg][fg];[bg]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,gblur=sigma=28[bg];[fg]scale=1080:-2[fg];[bg][fg]overlay=(W-w)/2:(H-h)/2,unsharp=5:5:0.25";
+  }
   return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}`;
 }
 
@@ -223,6 +226,23 @@ function concatPath(value: string) {
   return value.replace(/'/g, "'\\''");
 }
 
+function srtTimestamp(seconds: number) {
+  const safe = Math.max(0, seconds);
+  const hours = Math.floor(safe / 3600);
+  const minutes = Math.floor((safe % 3600) / 60);
+  const wholeSeconds = Math.floor(safe % 60);
+  const millis = Math.round((safe - Math.floor(safe)) * 1000);
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(wholeSeconds).padStart(2, "0")},${String(millis).padStart(3, "0")}`;
+}
+
+function escapeSubtitleText(value: string) {
+  return value.replace(/\r?\n/g, " ").replace(/[{}]/g, "").slice(0, 96);
+}
+
+function escapeFilterPath(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
+}
+
 export async function createFinalEdit(input: {
   masterPath: string;
   outputPath: string;
@@ -231,8 +251,10 @@ export async function createFinalEdit(input: {
   hasAudio?: boolean;
   onProgress?: ProgressReporter;
   audioFilter?: string;
+  burnCaptions?: boolean;
 }) {
   const editListPath = path.join(input.workdir, "final-edit.concat.txt");
+  const subtitlePath = path.join(input.workdir, `${path.basename(input.outputPath)}.srt`);
   const clips = input.clipPlan
     .filter((clip) => Number.isFinite(clip.startSeconds) && Number.isFinite(clip.endSeconds) && clip.endSeconds > clip.startSeconds)
     .sort((a, b) => a.startSeconds - b.startSeconds);
@@ -242,6 +264,18 @@ export async function createFinalEdit(input: {
     .join("\n");
   const durationSeconds = clips.reduce((sum, clip) => sum + Math.max(0, clip.endSeconds - clip.startSeconds), 0);
   await writeFile(editListPath, `${concatList}\n`, "utf8");
+  if (input.burnCaptions) {
+    let cursor = 0;
+    const srt = clips.map((clip, index) => {
+      const duration = Math.max(0, clip.endSeconds - clip.startSeconds);
+      const start = cursor;
+      const end = Math.min(cursor + duration, cursor + 7);
+      cursor += duration;
+      return `${index + 1}\n${srtTimestamp(start)} --> ${srtTimestamp(end)}\n${escapeSubtitleText(clip.note || clip.label)}\n`;
+    }).join("\n");
+    await writeFile(subtitlePath, srt, "utf8");
+  }
+  const captionFilter = input.burnCaptions ? `subtitles='${escapeFilterPath(subtitlePath)}':force_style='Fontsize=28,PrimaryColour=&HFFFFFF&,OutlineColour=&H000000&,BorderStyle=3,Outline=1,Shadow=0,Alignment=8,MarginV=36'` : null;
   await runCommand("ffmpeg", [
     "-y",
     ...ffmpegProgressArgs(),
@@ -250,6 +284,7 @@ export async function createFinalEdit(input: {
     "-i", editListPath,
     "-map", "0:v:0",
     ...(input.hasAudio ? ["-map", "0:a:0?"] : []),
+    ...(captionFilter ? ["-vf", captionFilter] : []),
     ...(input.hasAudio && input.audioFilter ? ["-af", input.audioFilter] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",

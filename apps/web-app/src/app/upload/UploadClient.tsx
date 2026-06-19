@@ -76,7 +76,7 @@ const defaultPackageOptions: PackageOptions = {
   includeKeyMoments: true,
   useMatchData: true,
   includeCaptions: true,
-  burnCaptions: false,
+  burnCaptions: true,
   subtleZoom: true,
   voiceModulation: true,
   outputs: ["landscape", "vertical"],
@@ -251,7 +251,7 @@ function openDownloadUrl(url: string) {
 }
 
 function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJob | null; onDownload: () => void; downloadBusy: boolean }) {
-  const stage = String(job?.stage ?? job?.output?.stage ?? (job?.status === "completed" ? "completed" : "queued"));
+  const stage = String(job?.status === "completed" ? "completed" : job?.stage ?? job?.output?.stage ?? "queued");
   const progress = Math.min(100, Math.max(0, Number(job?.progress ?? 0)));
   const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));
   const statusClass = job?.status === "failed" ? "warning" : job?.status === "completed" ? "status" : "muted";

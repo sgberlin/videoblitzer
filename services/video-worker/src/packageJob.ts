@@ -38,6 +38,7 @@ async function updatePackageState(
   const packagePatch = {
     status,
     updated_at: now,
+    ...(status === "completed" ? { stage: "completed", stage_started_at: now } : {}),
     locked_at: status === "processing" ? patch.locked_at ?? now : null,
     worker_id: status === "processing" ? patch.worker_id ?? workerId : null,
     last_heartbeat_at: status === "processing" ? now : patch.last_heartbeat_at ?? null,
@@ -348,7 +349,7 @@ function isVerticalFallbackClip(clip: PackageManifest["clipPlan"][number]) {
 function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSeconds: number) {
   const goals = clipPlan.filter(isGoalClip);
   const source = goals.length ? goals : clipPlan.filter(isVerticalFallbackClip);
-  const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, 6);
+  const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, goals.length ? goals.length : 3);
   return selected.map((clip, index) => {
     const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(120, (clip.endSeconds - clip.startSeconds) * 0.7)));
     const startSeconds = Math.max(0, center - 120);
@@ -366,7 +367,7 @@ function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSec
 
 function voiceModulationFilter(options: Record<string, unknown>) {
   if (options.voiceModulation === false) return undefined;
-  return "asetrate=48000*1.03,aresample=48000,atempo=0.9709,equalizer=f=3000:t=q:w=1:g=1.5,loudnorm=I=-16:TP=-1.5:LRA=11";
+  return "asetrate=48000*1.05,aresample=48000,atempo=0.95238,loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function isSchemaCacheMissingColumn(error: unknown) {
@@ -873,6 +874,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const options = packageOptions(job);
     const includeMaster = Boolean(audioSourceObjectKey);
     const includeCaptions = optionBoolean(options, "includeCaptions", true);
+    const burnCaptions = includeCaptions && optionBoolean(options, "burnCaptions", true);
     const voiceFilter = voiceModulationFilter(options);
     const useFastCopyMaster = mode === "fast" && canCopyVideoForFastMaster(video, job);
 
@@ -969,6 +971,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       hasAudio: hasAudioForExports,
       onProgress: reportFinalEditProgress,
       audioFilter: voiceFilter,
+      burnCaptions,
     }));
 
     const verticalClipPlan = verticalReelClipPlan(analysis.clipPlan, analysis.durationSeconds);
@@ -982,6 +985,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       hasAudio: hasAudioForExports,
       onProgress: reportClipProgress,
       audioFilter: voiceFilter,
+      burnCaptions,
     }));
 
     await markStage(client, job, "preset_exports", 70, { exportPlan: "one 16:9 highlights video and one 9:16 goals reel" });
