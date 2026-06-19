@@ -1,5 +1,5 @@
-import { CaptureScreenVideoPage } from "../capture-screen-video/CaptureScreenVideoPage";
+import { redirect } from "next/navigation";
 
 export default function DesktopRecorderPage() {
-  return <CaptureScreenVideoPage />;
+  redirect("/upload");
 }

@@ -19,7 +19,6 @@ type DuplicateSummary = {
 };
 type CompletedUpload = { video: { id: string; project_id: string; filename: string; storage_key: string; has_video?: boolean; has_audio?: boolean; duration_seconds?: number | null; width?: number | null; height?: number | null; video_codec?: string | null; audio_codec?: string | null; duplicate_of_video_id?: string | null }; duplicate?: DuplicateSummary | null };
 type PackageMode = "fast" | "high_quality";
-type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "player_highlight" | "tiktok_first" | "instagram_reels" | "youtube_shorts" | "defensive_plays" | "offensive_plays" | "custom";
 type PackageJobResponse = { job_id: string; status: string };
 type PackageJob = { id?: string; status?: string; stage?: string; progress?: number; error_message?: string; artifact_object_key?: string | null; created_at?: string; output?: Record<string, unknown> };
 type PackageStatusResponse = { packageJob: PackageJob; assets?: Array<Record<string, unknown>> };
@@ -54,6 +53,7 @@ type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete"
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
+type AudioMode = "original" | "replace";
 type SavedUploadSession = {
   savedAt: string;
   projectUrl: string;
@@ -291,31 +291,26 @@ function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJ
 function DuplicateDetectedPanel({
   duplicate,
   onReuse,
-  onAlternative,
   onCustom,
   busy,
 }: {
   duplicate: DuplicateSummary;
   onReuse: () => void;
-  onAlternative: (variant: PackageVariant) => void;
   onCustom: () => void;
   busy: boolean;
 }) {
   const completedJob = duplicate.packageJobs?.find((job) => job.status === "completed" && job.artifact_object_key);
   const originalProjectId = duplicate.originalProject?.id;
   return <div className="card">
-    <h3>Duplicate Detected</h3>
-    <p className="status">This video appears to match a previous upload.</p>
-    <p className="muted">This video was already uploaded{duplicate.originalProject?.created_at ? ` on ${new Date(duplicate.originalProject.created_at).toLocaleDateString()}` : ""}. You can reuse the existing package or create a new version with a different style.</p>
+    <h3>This Video Was Already Uploaded</h3>
+    <p className="status">You can download the previous ZIP, or create a new package using the recipe above.</p>
+    <p className="muted">The source video was uploaded{duplicate.originalProject?.created_at ? ` on ${new Date(duplicate.originalProject.created_at).toLocaleDateString()}` : ""}. Creating a new package reuses saved analysis when available, but applies your current captions, match-data, audio, and recipe settings.</p>
     <p><strong>Original project:</strong> {duplicate.originalProject?.title ?? "Previous project"}</p>
     <p className="muted">Packages: {duplicate.packageCount} total · {duplicate.completedPackageCount} completed · Last package: {duplicate.lastPackageCreatedAt ? new Date(duplicate.lastPackageCreatedAt).toLocaleString() : "none yet"}</p>
-    <p className="muted">Available package types: {duplicate.availablePackageTypes.length ? duplicate.availablePackageTypes.map((item) => item.replaceAll("_", " ")).join(", ") : "none yet"}</p>
-    <p className="muted">Alternative packages reuse the existing analysis, so they process faster.</p>
-    <button className="button" disabled={busy || !completedJob?.id} onClick={onReuse}>Reuse Existing Package</button>
-    <button className="button secondary" disabled={busy} onClick={() => onAlternative("high_energy")}>Create Alternative Package</button>
-    <button className="button secondary" disabled={busy} onClick={onCustom}>Create Custom Package</button>
+    <button className="button" disabled={busy} onClick={onCustom}>Create New Package With Current Recipe</button>
+    <button className="button secondary" disabled={busy || !completedJob?.id} onClick={onReuse}>Download Previous Package</button>
     {originalProjectId && <a className="button secondary" href={`/projects/${originalProjectId}/social-production`}>Open Original Project</a>}
-    {!completedJob?.id && <p className="warning">No completed package exists yet, but you can create an alternative or custom package from the saved analysis when available.</p>}
+    {!completedJob?.id && <p className="warning">No completed previous package exists yet. Create a new package with the current recipe instead.</p>}
   </div>;
 }
 
@@ -354,6 +349,7 @@ function uploadToSignedUrl(file: File, signed: SignedUpload, contentType: string
 export function UploadClient() {
   const [file, setFile] = useState<File | null>(null);
   const [audioFile, setAudioFile] = useState<File | null>(null);
+  const [audioMode, setAudioMode] = useState<AudioMode>("original");
   const [title, setTitle] = useState("Match Upload");
   const [projects, setProjects] = useState<DashboardProject[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState("new");
@@ -458,15 +454,17 @@ export function UploadClient() {
 
   async function startUpload() {
     if (!file) { setStatus("Select an mp4, mov, mkv, or webm file first."); return; }
-    if (isSameLocalFile(file, audioFile)) {
+    const selectedAudioFile = audioMode === "replace" ? audioFile : null;
+    if (isSameLocalFile(file, selectedAudioFile)) {
       setAudioFile(null);
+      setAudioMode("original");
       setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
-      setStatus("The optional audio file must be a separate audio track, not the same file as the video. I removed it; click Upload Existing Video again.");
+      setStatus("The optional audio file must be a separate audio track, not the same file as the video. I removed it; click Save Source Video again.");
       return;
     }
     setBusy(true);
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: file.size, speedBytesPerSecond: 0, etaSeconds: null, state: "preparing" });
-    setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: audioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: audioFile ? "preparing" : "idle" });
+    setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: selectedAudioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: selectedAudioFile ? "preparing" : "idle" });
     setProjectUrl("");
     setUploadedVideo(null);
     setDuplicate(null);
@@ -481,25 +479,25 @@ export function UploadClient() {
       setStatus(selectedProjectId === "new" ? "Creating project..." : "Preparing selected project...");
       const created = await resolveProject(file);
       const contentType = contentTypeForVideo(file);
-      const audioContentType = audioFile ? contentTypeForAudio(audioFile) : null;
+      const audioContentType = selectedAudioFile ? contentTypeForAudio(selectedAudioFile) : null;
 
       setStatus("Requesting signed R2 upload URL...");
       const signed = await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType }),
       }, accessToken);
-      const signedAudio = audioFile && audioContentType ? await apiFetch<SignedUpload>("/uploads/create-signed-url", {
+      const signedAudio = selectedAudioFile && audioContentType ? await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
-        body: JSON.stringify({ projectId: created.project.id, filename: audioFile.name, contentType: audioContentType }),
+        body: JSON.stringify({ projectId: created.project.id, filename: selectedAudioFile.name, contentType: audioContentType }),
       }, accessToken) : null;
 
       setStatus("Uploading directly to Cloudflare R2...");
       await uploadToSignedUrl(file, signed, contentType, setProgress);
       setProgress((current) => ({ ...current, percent: 100, loadedBytes: file.size, totalBytes: file.size, etaSeconds: 0, state: "verifying" }));
-      if (audioFile && signedAudio && audioContentType) {
+      if (selectedAudioFile && signedAudio && audioContentType) {
         setStatus("Uploading optional audio track to Cloudflare R2...");
-        await uploadToSignedUrl(audioFile, signedAudio, audioContentType, setAudioProgress);
-        setAudioProgress((current) => ({ ...current, percent: 100, loadedBytes: audioFile.size, totalBytes: audioFile.size, etaSeconds: 0, state: "verifying" }));
+        await uploadToSignedUrl(selectedAudioFile, signedAudio, audioContentType, setAudioProgress);
+        setAudioProgress((current) => ({ ...current, percent: 100, loadedBytes: selectedAudioFile.size, totalBytes: selectedAudioFile.size, etaSeconds: 0, state: "verifying" }));
       }
 
       setStatus("Verifying R2 upload with HeadObject...");
@@ -507,7 +505,7 @@ export function UploadClient() {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
       }, accessToken);
-      if (audioFile && verification.media?.has_audio === true) {
+      if (selectedAudioFile && verification.media?.has_audio === true) {
         const shouldOverrideAudio = window.confirm("This video already contains audio. Do you want to replace the video's audio with the separate audio file for package production?");
         if (!shouldOverrideAudio) {
           setStatus("Upload stopped before package setup. Remove the separate audio file or confirm audio replacement, then upload again.");
@@ -526,11 +524,11 @@ export function UploadClient() {
           contentType,
           storageKey: signed.key,
           sizeBytes: file.size,
-          audio_source: includeAudioSource && audioFile && signedAudio && audioContentType ? {
+          audio_source: includeAudioSource && selectedAudioFile && signedAudio && audioContentType ? {
             object_key: signedAudio.key,
-            filename: audioFile.name,
+            filename: selectedAudioFile.name,
             content_type: audioContentType,
-            size_bytes: audioFile.size,
+            size_bytes: selectedAudioFile.size,
           } : undefined,
         }),
       }, accessToken);
@@ -547,7 +545,7 @@ export function UploadClient() {
       }
 
       setProgress((current) => ({ ...current, state: "complete" }));
-      if (audioFile) setAudioProgress((current) => ({ ...current, state: audioSourceSkipped ? "skipped" : "complete" }));
+      if (selectedAudioFile) setAudioProgress((current) => ({ ...current, state: audioSourceSkipped ? "skipped" : "complete" }));
       setUploadedVideo(completed.video);
       setDuplicate(completed.duplicate ?? null);
       const audioSkipNote = audioSourceSkipped ? " Optional audio was ignored because it had no audio stream." : "";
@@ -566,18 +564,11 @@ export function UploadClient() {
       });
     } catch (error) {
       setProgress((current) => ({ ...current, state: "failed" }));
-      if (audioFile) setAudioProgress((current) => ({ ...current, state: "failed" }));
+      if (selectedAudioFile) setAudioProgress((current) => ({ ...current, state: "failed" }));
       setStatus(error instanceof Error ? error.message : "Upload failed. Please try again.");
     } finally {
       setBusy(false);
     }
-  }
-
-  function toggleOutput(output: PackageOptions["outputs"][number], checked: boolean) {
-    setPackageOptions((current) => {
-      const outputs = checked ? [...new Set([...current.outputs, output])] : current.outputs.filter((item) => item !== output);
-      return { ...current, outputs: outputs.length ? outputs : current.outputs };
-    });
   }
 
   function buildPackageOptions(): PackageOptions {
@@ -678,26 +669,6 @@ export function UploadClient() {
     }
   }
 
-  async function createAlternativePackage(variant: PackageVariant) {
-    if (!auth.session?.access_token || !uploadedVideo) return;
-    setPackageBusy(true);
-    try {
-      const options = buildPackageOptions();
-      await confirmMatchDataForPackage(uploadedVideo.project_id, options);
-      const response = await apiFetch<PackageJobResponse>("/packages/generate-alternative", {
-        method: "POST",
-        body: JSON.stringify({ projectId: uploadedVideo.project_id, videoId: uploadedVideo.id, packageMode: "fast", packageVariant: variant, packageOptions: options }),
-      }, auth.session.access_token);
-      setPackageJob({ id: response.job_id, status: response.status, stage: "queued", progress: 0 });
-      setPackageStatus(`Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.`);
-      persistCurrentSession({ packageJob: { id: response.job_id, status: response.status, stage: "queued", progress: 0 }, packageStatus: `Alternative package queued: ${response.job_id}. It will reuse saved analysis when available.` });
-    } catch (error) {
-      setPackageStatus(friendlyPackageError(error));
-    } finally {
-      setPackageBusy(false);
-    }
-  }
-
   async function createCustomPackage() {
     if (!auth.session?.access_token || !uploadedVideo) return;
     setPackageBusy(true);
@@ -779,6 +750,8 @@ export function UploadClient() {
     setProjectUrl("");
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
     setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" });
+    setAudioMode("original");
+    setAudioFile(null);
     setStatus(saved ? "Cleared this page and archived the work below. You can restore it anytime." : "Cleared this page.");
   }
 
@@ -805,8 +778,15 @@ export function UploadClient() {
 
   function renderPackageOptionsPanel() {
     return <div className="card">
-      <h3>Package Options</h3>
-      <p className="muted">Package output is fixed: one 16:9 highlights edit and one 9:16 goals/big-chance reel. If separate audio was uploaded, the merged master is added automatically.</p>
+      <h3>Package Recipe</h3>
+      <p className="muted">These settings apply when you create a new package. Downloading a previous package keeps the old ZIP unchanged.</p>
+      <div className="card">
+        <h3>What You'll Get</h3>
+        <p className="status">16:9 match highlights · target 15-20 minutes</p>
+        <p className="status">9:16 goal reel · goals only, max 10 minutes</p>
+        <p className="muted">Caption files are included when captions are on. Embedded event text shows event type, minute, scorer, and team when match data is available.</p>
+        <p className="muted">A merged master video is added only when you replace the original audio with a separate audio file.</p>
+      </div>
       <label><input type="checkbox" checked={packageOptions.useMatchData} onChange={(event) => setPackageOptions((current) => ({ ...current, useMatchData: event.target.checked }))} /> Use match data for clip timing</label><br />
       <label><input type="checkbox" checked={packageOptions.includeGoalClips} onChange={(event) => setPackageOptions((current) => ({ ...current, includeGoalClips: event.target.checked }))} /> Goal clips with buildup</label><br />
       <label><input type="checkbox" checked={packageOptions.includeKeyMoments} onChange={(event) => setPackageOptions((current) => ({ ...current, includeKeyMoments: event.target.checked }))} /> Other key moments</label><br />
@@ -836,11 +816,11 @@ export function UploadClient() {
   if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
 
   return <section className="hero">
-    <h1>Upload Existing Video</h1>
-    <p className="muted">Accepted video formats: mp4, mov, mkv, webm. Optional separate audio can be uploaded as mp3, mp4, wav, m4a, aac, ogg, flac, or webm.</p>
+    <h1>Upload Video and Create Package</h1>
+    <p className="muted">Upload an existing match video, choose the package recipe, then create a downloadable ZIP with final 16:9 and 9:16 videos.</p>
     <div className="grid grid-2">
       <div className="card">
-        <h3>Upload Existing Video</h3>
+        <h3>1. Source Video</h3>
         <label>Project</label>
         <select className="input" value={selectedProjectId} onChange={(event) => setSelectedProjectId(event.target.value)}>
           <option value="new">Create a new project</option>
@@ -860,22 +840,29 @@ export function UploadClient() {
         }} />
         {file && <p className="muted">Selected: {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</p>}
         <br /><br />
-        <label>Optional separate audio file</label>
-        <input className="input" type="file" accept=".mp3,.mp4,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,video/mp4" onChange={(event) => {
-          const nextAudioFile = event.target.files?.[0] ?? null;
-          if (isSameLocalFile(file, nextAudioFile)) {
-            event.currentTarget.value = "";
-            setAudioFile(null);
-            setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
-            setStatus("That is the same file as the video. Optional audio must be a separate audio track, so it was not attached.");
-            return;
-          }
-          setAudioFile(nextAudioFile);
-        }} />
-        {audioFile && <p className="muted">Optional audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
-        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is only for a separate audio track; if your video already has audio, leave this empty.</p>
-        {audioFile && <p className="warning">If the video already contains audio, VideoBlitzer will ask before replacing it with this separate audio file.</p>}
-        <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Upload Existing Video"}</button>
+        <h3>2. Audio</h3>
+        <label><input type="radio" checked={audioMode === "original"} onChange={() => { setAudioMode("original"); setAudioFile(null); setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "idle" }); }} /> Use the video's original audio</label><br />
+        <label><input type="radio" checked={audioMode === "replace"} onChange={() => setAudioMode("replace")} /> Replace with a separate audio file</label>
+        {audioMode === "replace" && <>
+          <br /><br />
+          <label>Separate audio file</label>
+          <input className="input" type="file" accept=".mp3,.mp4,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,video/mp4" onChange={(event) => {
+            const nextAudioFile = event.target.files?.[0] ?? null;
+            if (isSameLocalFile(file, nextAudioFile)) {
+              event.currentTarget.value = "";
+              setAudioFile(null);
+              setAudioMode("original");
+              setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
+              setStatus("That is the same file as the video. Separate audio must be its own audio track, so it was not attached.");
+              return;
+            }
+            setAudioFile(nextAudioFile);
+          }} />
+          {audioFile && <p className="muted">Replacement audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
+          <p className="warning">Use this only when you want to replace the video's existing audio with a separate commentary/music track.</p>
+        </>}
+        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the source before package production.</p>
+        <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Save Source Video"}</button>
         <p className={progress.state === "failed" ? "warning" : progress.state === "complete" ? "status" : "muted"}>{status}</p>
         {uploadedVideo && <p className="status">Saved. If the browser refreshes, this upload and package job will be restored here.</p>}
         <div className="card">
@@ -883,7 +870,7 @@ export function UploadClient() {
           <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}><div style={{ width: `${progress.percent}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} /></div>
           <p className="muted">State: {progress.state}</p>
           <p className="muted">{formatBytes(progress.loadedBytes)} / {formatBytes(progress.totalBytes || file?.size || 0)} · {formatBytes(progress.speedBytesPerSecond)}/s · ETA {formatEta(progress.etaSeconds)}</p>
-          {audioFile && <>
+          {audioMode === "replace" && audioFile && <>
             <strong>Audio: {audioProgress.percent}% uploaded</strong>
             <div style={{ height: 10, background: "rgba(255,255,255,.1)", borderRadius: 999 }}><div style={{ width: `${audioProgress.percent}%`, height: 10, background: "var(--accent)", borderRadius: 999 }} /></div>
             <p className="muted">Audio state: {audioProgress.state}</p>
@@ -892,17 +879,17 @@ export function UploadClient() {
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
         {uploadedVideo && renderPackageOptionsPanel()}
-        {uploadedVideo && duplicate && <DuplicateDetectedPanel duplicate={duplicate} busy={packageBusy} onReuse={() => void reuseExistingPackage()} onAlternative={(variant) => void createAlternativePackage(variant)} onCustom={() => void createCustomPackage()} />}
+        {uploadedVideo && duplicate && <DuplicateDetectedPanel duplicate={duplicate} busy={packageBusy} onReuse={() => void reuseExistingPackage()} onCustom={() => void createCustomPackage()} />}
         {uploadedVideo && !duplicate && <div className="card">
-          <h3>Produce Package</h3>
+          <h3>3. Create Package</h3>
           {uploadedVideo.has_video === true
             ? <p className="status">Upload verified. Ready to produce package.</p>
             : <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
-          {audioFile && <p className="status">Separate audio uploaded. The package worker will replace the video's original audio with this track before creating clips and exports.</p>}
+          {audioMode === "replace" && audioFile && <p className="status">Replacement audio uploaded. The package worker will merge it before creating final videos.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
-          <button className="button" onClick={() => void producePackage("fast")} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Fast Package"}</button>
-          <button className="button secondary" onClick={() => void producePackage("high_quality")} disabled={packageBusy || uploadedVideo.has_video !== true}>High Quality Package</button>
+          <button className="button" onClick={() => void producePackage("fast")} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Create Package With Current Recipe"}</button>
+          <button className="button secondary" onClick={() => void producePackage("high_quality")} disabled={packageBusy || uploadedVideo.has_video !== true}>Create High Quality Package</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
           {packageStatus && <p className={isPackageWarning(packageStatus) ? "warning" : "muted"}>{packageStatus}</p>}
         </div>}

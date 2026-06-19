@@ -7,8 +7,8 @@ import type { DashboardProject } from "../../lib/types";
 
 export function ProjectsClient() {
   const [projects, setProjects] = useState<DashboardProject[]>([]);
-  const [title, setTitle] = useState("Saturday Match Highlights");
-  const [status, setStatus] = useState("Load your projects or create a new match workspace.");
+  const [title, setTitle] = useState("Match Upload");
+  const [status, setStatus] = useState("Create or open a project to manage uploaded videos and packages.");
   const [authStatus, setAuthStatus] = useState<AuthState>("loading");
   const auth = useAuthSession();
 
@@ -52,5 +52,5 @@ export function ProjectsClient() {
   if (auth.status === "loading" || authStatus === "loading") return <AuthStatusMessage status="loading" />;
   if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
 
-  return <section className="grid"><div className="hero"><h1>Create a match project</h1><p className="muted">Projects keep the source video, match data, highlight timeline, thumbnail, social pack, and exports together.</p><input className="input" value={title} onChange={(event) => setTitle(event.target.value)} /><br /><br /><button className="button" onClick={createProject}>Create Project Workspace</button><p className="muted">{status}</p></div><div className="grid grid-2">{projects.map((project) => <a className="card" href={`/projects/${project.id}/overview`} key={project.id}><h3>{project.title}</h3><p className="muted">{project.status}</p></a>)}</div></section>;
+  return <section className="grid"><div className="hero"><h1>Projects</h1><p className="muted">Projects keep uploaded source videos, package recipes, generated ZIPs, and package history together.</p><div className="tabs"><a className="button" href="/upload">Upload Video and Create Package</a></div><br /><input className="input" value={title} onChange={(event) => setTitle(event.target.value)} /><br /><br /><button className="button secondary" onClick={createProject}>Create Empty Project</button><p className="muted">{status}</p></div><div className="grid grid-2">{projects.map((project) => <a className="card" href={`/projects/${project.id}/overview`} key={project.id}><h3>{project.title}</h3><p className="muted">{project.status}</p></a>)}</div></section>;
 }

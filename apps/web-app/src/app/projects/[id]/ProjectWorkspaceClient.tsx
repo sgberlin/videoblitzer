@@ -15,7 +15,6 @@ type PackageJob = { id?: string; status?: string; stage?: string; progress?: num
 type PackageAsset = { id?: string; package_job_id?: string; asset_type?: string; platform?: string; filename?: string; storage_key?: string; duration_seconds?: number; width?: number; height?: number; aspect_ratio?: string; validation_status?: string; confidence?: number; metadata?: Record<string, unknown> };
 type UploadVerification = { id?: string; video_id?: string; object_key?: string; status?: string; verified_size_bytes?: number; verified_content_type?: string; verified_at?: string; error_message?: string };
 type VideoRecord = Record<string, unknown> & { id?: string; duplicate_of_video_id?: string | null; analysis_status?: string | null; analysis_metadata?: Record<string, unknown> | null; file_sha256?: string | null };
-type PackageVariant = "standard_highlights" | "high_energy" | "coach_review" | "player_highlight" | "tiktok_first" | "instagram_reels" | "youtube_shorts" | "defensive_plays" | "offensive_plays";
 
 function JsonCard({ title, value }: { title: string; value: unknown }) {
   return <div className="card"><h3>{title}</h3><pre style={{ whiteSpace: "pre-wrap", overflowX: "auto" }}>{JSON.stringify(value, null, 2)}</pre></div>;
@@ -47,7 +46,7 @@ const packageStages = [
 ];
 
 function PackageTimeline({ job }: { job?: PackageJob }) {
-  const stage = String(job?.stage ?? job?.output?.stage ?? "queued");
+  const stage = String(job?.status === "completed" ? "completed" : job?.stage ?? job?.output?.stage ?? "queued");
   const progress = Number(job?.progress ?? 0);
   return <div className="card">
     <h3>Package Progress</h3>
@@ -81,6 +80,7 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
   const activePackage = latestPackage && ["queued", "processing"].includes(String(latestPackage.status));
   const packageComplete = latestPackage?.status === "completed";
   const packageFailed = latestPackage?.status === "failed";
+  const packageFormula = (latestPackage?.output?.packageFormula ?? latestPackage?.manifest_json?.packageFormula ?? null) as Record<string, unknown> | null;
 
   async function producePackage(packageMode: "fast" | "high_quality") {
     if (!token || !latestVideo?.id) return;
@@ -90,7 +90,7 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
         method: "POST",
         body: JSON.stringify({ projectId, videoId: latestVideo.id, packageMode }),
       }, token);
-      setMessage(`${packageMode === "fast" ? "Fast Package" : "High Quality Package"} queued: ${response.job_id}`);
+      setMessage(`${packageMode === "fast" ? "Package" : "High quality package"} queued: ${response.job_id}. It will use the current package recipe.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not queue package.");
     } finally {
@@ -98,27 +98,8 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     }
   }
 
-  async function generateVariant(packageVariant: PackageVariant) {
-    if (!token || !latestVideo?.id) return;
-    setBusy(true);
-    try {
-      const response = await apiFetch<{ job_id: string }>("/packages/generate-alternative", {
-        method: "POST",
-        body: JSON.stringify({ projectId, videoId: latestVideo.id, packageMode: "fast", packageVariant }),
-      }, token);
-      setMessage(`New ${packageVariant.replaceAll("_", " ")} package queued: ${response.job_id}. It will reuse saved analysis when available.`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Could not queue package variant.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
   async function generateCustom() {
     if (!token || !latestVideo?.id) return;
-    const targetPlatform = window.prompt("Target platform", "TikTok") ?? "";
-    if (!targetPlatform.trim()) return;
-    const numberOfClips = Number(window.prompt("Number of clips", "6") ?? "6");
     setBusy(true);
     try {
       const response = await apiFetch<{ job_id: string }>("/packages/generate-custom", {
@@ -128,17 +109,22 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
           videoId: latestVideo.id,
           packageMode: "fast",
           packageOptions: {
-            targetPlatform,
+            targetPlatform: "16:9 highlights and 9:16 goal reel",
             tonePreset: "high_energy",
-            clipDurationPreference: "short",
-            numberOfClips: Number.isFinite(numberOfClips) ? numberOfClips : 6,
-            includeCaptions: window.confirm("Include captions?"),
-            outputs: ["vertical", "landscape", "square"],
+            clipDurationPreference: "final_videos",
+            numberOfClips: 8,
+            includeCaptions: true,
+            burnCaptions: true,
+            useMatchData: true,
+            includeGoalClips: true,
+            includeKeyMoments: true,
+            voiceModulation: true,
+            outputs: ["vertical", "landscape"],
             focusType: "big_plays",
           },
         }),
       }, token);
-      setMessage(`Custom package queued: ${response.job_id}.`);
+      setMessage(`New package queued with the standard recipe: ${response.job_id}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Could not queue custom package.");
     } finally {
@@ -186,9 +172,9 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
   return <section className="grid">
     <div className="card">
       <span className="pill">Social Media Production</span>
-      <h2>Turn Full Games Into Social Media Content</h2>
-      <p className="muted">Primary workflow: upload an existing video or import a direct media URL, verify the source, produce a social package, review generated assets, and download the ZIP.</p>
-      <p><a className="button secondary" href="/upload">Upload Existing Video</a> <a className="button secondary" href={`/projects/${projectId}/imports`}>Import Direct Media URL</a></p>
+      <h2>Package Production</h2>
+      <p className="muted">Review the verified source, create a new package with the current recipe, and download completed ZIPs.</p>
+      <p><a className="button" href="/upload">Upload Video and Create Package</a> <a className="button secondary" href={`/projects/${projectId}/imports`}>Import Direct Media URL</a></p>
     </div>
 
     <div className="grid grid-2">
@@ -208,10 +194,10 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
       </div>
 
       <div className="card">
-        <h3>Produce Package</h3>
-        <p className="muted">Fast Package uses stream-copy where safe, three core social formats, and limited parallel rendering. High Quality Package uses the full render path.</p>
-        <button className="button" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage("fast")}>{busy ? "Working..." : "Produce Fast Package"}</button>
-        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage("high_quality")}>High Quality Package</button>
+        <h3>Create Package</h3>
+        <p className="muted">The standard recipe creates one 16:9 highlights video, one 9:16 goal reel, caption assets, and embedded event text when available.</p>
+        <button className="button" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateCustom()}>{busy ? "Working..." : "Create New Package With Current Recipe"}</button>
+        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void producePackage("high_quality")}>Create High Quality Package</button>
         {!uploadVerified && <p className="warning">Button stays disabled until upload verification succeeds.</p>}
         {isAudioOnly && <p className="warning">This file contains audio only. Social media video packages require a video stream.</p>}
         {uploadVerified && !isAudioOnly && !hasVideoStream && <p className="warning">Video stream metadata is missing. Re-upload or re-verify before producing a package.</p>}
@@ -235,12 +221,10 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
       </div>
 
       <div className="card">
-        <h3>Generate New Variant</h3>
-        <p className="muted">Alternative packages reuse existing analysis when available, so they process faster than a full first-time package.</p>
-        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("high_energy")}>High Energy</button>
-        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("tiktok_first")}>TikTok First</button>
-        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateVariant("coach_review")}>Coach Review</button>
-        <button className="button secondary" disabled={busy || !latestVideo || !uploadVerified || !hasVideoStream || Boolean(activePackage)} onClick={() => void generateCustom()}>Custom Package</button>
+        <h3>Package Recipe</h3>
+        <p className="status">16:9 match highlights · target 15-20 minutes</p>
+        <p className="status">9:16 goal reel · goals only, max 10 minutes</p>
+        <p className="muted">Caption assets and embedded event text are enabled in the standard recipe. Event text uses goal, minute, scorer, and team when match data is available.</p>
       </div>
     </div>
 
@@ -249,10 +233,10 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
       {packageJobs.length ? <div className="grid grid-2">{packageJobs.slice(0, 12).map((job) => {
         const variant = String(job.package_variant ?? job.input?.packageVariant ?? "standard_highlights");
         return <div className="card" key={job.id}>
-          <strong>{variant.replaceAll("_", " ")}</strong>
+          <strong>{variant === "custom" ? "current recipe" : variant.replaceAll("_", " ")}</strong>
           <p className={job.status === "completed" ? "status" : job.status === "failed" ? "warning" : "muted"}>{job.status ?? "queued"} · {job.progress ?? 0}%</p>
           {job.created_at && <p className="muted">Created {new Date(job.created_at).toLocaleString()}</p>}
-          {job.status === "completed" && job.id && <button className="button secondary" onClick={() => void downloadPackageById(job.id)}>Download Previous ZIP</button>}
+          {job.status === "completed" && job.id && <button className="button secondary" onClick={() => void downloadPackageById(job.id)}>Download Package ZIP</button>}
         </div>;
       })}</div> : <EmptyState label="existing package" />}
     </div>
@@ -269,13 +253,12 @@ function SocialProductionWorkspace({ data, projectId, token }: { data: ProjectDe
     </div>
 
     <div className="card">
-      <h3>Package Standards</h3>
-      <p className="muted">ZIP includes clips by aspect ratio, thumbnails, SRT social captions, metadata, manifest.json, and README.txt. Low-confidence clips are labeled as candidates for review.</p>
-      <ul>
-        <li>Instagram Reels, TikTok, YouTube Shorts, Facebook Reels: 9:16 1080x1920 clips.</li>
-        <li>YouTube Standard: 16:9 1920x1080 landscape assets.</li>
-        <li>Optional square social clips: 1:1 1080x1080.</li>
-      </ul>
+      <h3>Latest Package Formula</h3>
+      {packageFormula ? <>
+        <p className="muted">16:9 actual: {String(packageFormula.landscapeActualSeconds ?? "unknown")} seconds · clips: {String(packageFormula.landscapeClipCount ?? "unknown")}</p>
+        <p className="muted">9:16 actual: {String(packageFormula.verticalActualSeconds ?? "unknown")} seconds · clips: {String(packageFormula.verticalClipCount ?? "unknown")}</p>
+        <p className="muted">Captions: assets {packageFormula.captionAssetsEnabled === false ? "off" : "on"} · embedded {packageFormula.embeddedCaptionsEnabled ? "on" : "off"} · voice pitch shift {String(packageFormula.voicePitchDeviationPercent ?? 0)}%</p>
+      </> : <p className="muted">New packages record the exact formula, durations, caption mode, and voice settings in the ZIP manifest.</p>}
     </div>
   </section>;
 }
@@ -340,7 +323,7 @@ function DirectUrlImport({ projectId, jobs, token }: { projectId: string; jobs: 
   }
 
   return <section className="grid">
-    <div className="card"><h2>Import Direct Video URL</h2><p className="muted">Admin/private-beta feature for authorized direct media files only. YouTube, Vimeo, social, stream, and platform pages are metadata-only and cannot be downloaded here.</p><input className="input" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.com/authorized-video.webm" /><br /><br /><label className="toggle"><input type="checkbox" checked={permissionConfirmed} onChange={(event) => setPermissionConfirmed(event.target.checked)} /> I confirm I own this file or have permission to import it.</label><br /><br /><button className="button" disabled={busy || !sourceUrl || !permissionConfirmed} onClick={() => void startImport()}>{busy ? "Queueing..." : "Import Direct Video URL"}</button><p className="muted">{message}</p><p className="warning">Video platform pages cannot be downloaded here. Use Capture Screen Video if you have permission to record your own accessible source.</p></div>
+    <div className="card"><h2>Import Direct Video URL</h2><p className="muted">Admin/private-beta feature for authorized direct media files only. YouTube, Vimeo, social, stream, and platform pages are metadata-only and cannot be downloaded here.</p><input className="input" value={sourceUrl} onChange={(event) => setSourceUrl(event.target.value)} placeholder="https://example.com/authorized-video.webm" /><br /><br /><label className="toggle"><input type="checkbox" checked={permissionConfirmed} onChange={(event) => setPermissionConfirmed(event.target.checked)} /> I confirm I own this file or have permission to import it.</label><br /><br /><button className="button" disabled={busy || !sourceUrl || !permissionConfirmed} onClick={() => void startImport()}>{busy ? "Queueing..." : "Import Direct Video URL"}</button><p className="muted">{message}</p><p className="warning">Video platform pages cannot be downloaded here. Upload a local video file to create packages from accessible media.</p></div>
     <div className="grid grid-2">{jobs.length ? jobs.map((job) => <div className="card" key={job.id}><h3>Import {job.status ?? "queued"}</h3><p className={job.status === "failed" ? "warning" : job.status === "completed" ? "status" : "muted"}>{job.status === "completed" ? "Imported to R2 and attached to this project." : job.status === "failed" ? job.error_message ?? "Import failed." : "Worker is validating and importing this source."}</p><p>Progress: {job.progress ?? 0}%</p>{job.source_url && <p><strong>Source URL</strong><br /><span className="muted">{job.source_url}</span></p>}{job.r2_object_key && <p><strong>R2 object key</strong><br /><span className="muted">{job.r2_object_key}</span></p>}{job.status === "failed" && <button className="button secondary" disabled={busy} onClick={() => void retryImport(job.id)}>Retry import</button>}</div>) : <div className="card"><EmptyState label="direct import job" /></div>}</div>
   </section>;
 }

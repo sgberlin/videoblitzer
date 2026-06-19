@@ -1,5 +1,5 @@
-import { CaptureScreenVideoPage } from "./CaptureScreenVideoPage";
+import { redirect } from "next/navigation";
 
 export default function Page() {
-  return <CaptureScreenVideoPage />;
+  redirect("/upload");
 }

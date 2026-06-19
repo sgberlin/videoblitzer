@@ -147,9 +147,9 @@ export function DashboardClient() {
     <section className="hero">
       {data.profile.isOwner && <OwnerModeBadge />}
       <h1>VideoBlitzer dashboard</h1>
-      <p className="muted">Signed in as {data.profile.email}. Server-side access is enforced by the API before any project, job, or storage data is returned.</p>
-      <p className="muted">Use the recorder to capture browser video, online matches, app windows, or your full screen.</p>
-      <div className="tabs"><a className="button" href="/projects">New Match Project</a><a className="button secondary" href="/upload">Upload Existing Video</a><a className="button secondary" href="/capture-screen-video">Download Screen Recorder</a></div>
+      <p className="muted">Signed in as {data.profile.email}. Upload match video, choose the package recipe, then produce downloadable social-ready videos.</p>
+      <p className="muted">Core workflow: upload once, reuse verified media, create new packages with updated settings whenever needed.</p>
+      <div className="tabs"><a className="button" href="/upload">Upload Video and Create Package</a><a className="button secondary" href="/projects">View Projects</a></div>
       <CreditBadge credits={data.creditBalance} />
     </section>
     <br />

@@ -1,0 +1,15 @@
+---
+description: Web app UX standards for upload and package production
+globs: apps/web-app/src/**/*.tsx
+alwaysApply: false
+---
+
+# Web App Package UX
+
+- Keep the web app centered on: Upload -> Package Recipe -> Produce -> Download/Review.
+- Do not promote screen capture or recorder setup in the web app primary navigation. The desktop recorder is separate, later work.
+- Use action-oriented CTAs: `Create New Package With Current Recipe`, `Download Previous Package`, `Open Project`.
+- Duplicate flows must separate old output from new output: reuse/download the previous ZIP, or create a new package using current settings.
+- Audio setup must be explicit: default to original video audio; show separate audio upload only when the user chooses to replace audio.
+- Package copy must describe the actual deliverables: one 16:9 highlights edit, one 9:16 goal reel, optional merged master, caption assets, and embedded event text when enabled.
+- Status cards should show current state, next action, and recovery path before internal implementation details.

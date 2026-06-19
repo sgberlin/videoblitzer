@@ -8,7 +8,6 @@ const links: Array<[string, string]> = [
   ["Dashboard", "/dashboard"],
   ["Projects", "/projects"],
   ["Upload", "/upload"],
-  ["Capture Screen Video", "/capture-screen-video"],
   ["Admin", "/admin"],
   ["Manual", "/manual"],
   ["Privacy", "/privacy"],

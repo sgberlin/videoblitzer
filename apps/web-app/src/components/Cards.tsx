@@ -1,31 +1,26 @@
-import { exportPresets } from "@videoblitzer/export-presets";
-
 export function ProjectCard({ title, status }: { title: string; status: string }) {
   return <div className="card"><h3>{title}</h3><p className="muted">Status: <span className="status">{status}</span></p></div>;
 }
 
 const outputs = [
-  ["Pure Master", "16:9 source-safe", "12-18 min", "0 credits"],
-  ["3-Min Highlight Reel", "16:9 YouTube", "3 min", "20 credits"],
-  ["60-Sec Shorts", "9:16 vertical", "60 sec", "15 credits"],
-  ["Goals Only", "16:9 or 9:16", "Variable", "15 credits"],
-  ["Commentary Cut", "YouTube package", "3-8 min", "25 credits"],
-  ["Tactical Breakdown", "16:9 analysis", "4-10 min", "20 credits"],
-  ["Thumbnail Pack", "3 sizes", "Fast", "5 credits"],
-  ["Social Stats Pack", "Copy pack", "Fast", "5 credits"],
+  ["16:9 Match Highlights", "Goals, penalties, big chances, cards, VAR, saves, and late drama", "15-20 min"],
+  ["9:16 Goal Reel", "Goals only, with big-chance fallback if there are no goals", "Max 10 min"],
+  ["Caption Assets", "SRT files and social text generated from package moments", "Included when captions are on"],
+  ["Embedded Event Text", "Event type, minute, scorer, and team burned into videos when enabled", "Included when embedded captions are on"],
+  ["Merged Master", "Normalized master with replacement audio", "Only when separate audio is used"],
 ];
 
 export function OutputFormatCards() {
-  return <div className="grid grid-2">{outputs.map(([name, format, duration, cost]) => <div className="card" key={name}><h3>{name}</h3><p>{format}</p><p className="muted">Estimated duration: {duration}</p><p className="muted">Processing estimate: queue dependent</p><p className="pill">{cost}</p><br /><button className="button secondary">Generate</button></div>)}</div>;
+  return <div className="grid grid-2">{outputs.map(([name, format, duration]) => <div className="card" key={name}><h3>{name}</h3><p>{format}</p><p className="muted">{duration}</p></div>)}</div>;
 }
 
 export function FormatSelector() {
-  return <div className="card"><h3>Global Format & Crop Controls</h3><div className="grid grid-2"><select className="input">{exportPresets.map((preset) => <option key={preset.id}>{preset.label}</option>)}</select><select className="input"><option>Center Crop</option><option>Scoreboard Safe</option><option>Action Follow</option><option>Ball Follow</option><option>Facecam + Gameplay</option><option>Manual Crop</option></select></div></div>;
+  return <div className="card"><h3>Package Formula</h3><p className="muted">VideoBlitzer now creates a fixed, reviewable package: one landscape highlights edit, one vertical goal reel, supporting captions/metadata, and an optional merged master.</p><a className="button" href="/upload">Create New Package</a></div>;
 }
 
 export function ReadinessChecklist() {
-  const checks = ["Stats confirmed", "Thumbnail selected", "Title generated", "Description generated", "Captions included", "Chapters included", "Output formats selected", "Coach/squad fields complete if selected"];
-  return <div className="card"><h3>Ready to publish: 42%</h3>{checks.map((check) => <p key={check} className="muted">□ {check}</p>)}</div>;
+  const checks = ["Source video verified", "Package recipe selected", "Match data confirmed when available", "Caption assets selected", "Embedded event text selected", "Package ZIP downloaded"];
+  return <div className="card"><h3>Package Readiness</h3>{checks.map((check) => <p key={check} className="muted">□ {check}</p>)}</div>;
 }
 
 export function TimelineClipCard() {
