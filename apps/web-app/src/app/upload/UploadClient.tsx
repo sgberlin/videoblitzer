@@ -50,7 +50,7 @@ type DuplicateStatusResponse = {
   lastPackageCreatedAt?: string | null;
   packageJobs?: ExistingPackageJob[];
 };
-type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed";
+type UploadState = "idle" | "preparing" | "uploading" | "verifying" | "complete" | "failed" | "skipped";
 type UploadProgress = { percent: number; loadedBytes: number; totalBytes: number; speedBytesPerSecond: number; etaSeconds: number | null; state: UploadState };
 type UploadedVideoState = CompletedUpload["video"] & { project_id: string };
 type UploadVerificationResponse = { media?: { has_audio?: boolean; has_video?: boolean; audio_codec?: string | null; video_codec?: string | null } };
@@ -168,6 +168,10 @@ function friendlyPackageError(error: unknown) {
   const message = error instanceof Error ? error.message : "Could not produce package.";
   if (message.toLowerCase() === "failed to fetch") return "Could not contact the API. Check deployment/network status, then try Produce Package again.";
   return message;
+}
+
+function isSameLocalFile(a: File | null, b: File | null) {
+  return Boolean(a && b && a.name === b.name && a.size === b.size && a.lastModified === b.lastModified);
 }
 
 function isPackageWarning(message: string) {
@@ -454,6 +458,12 @@ export function UploadClient() {
 
   async function startUpload() {
     if (!file) { setStatus("Select an mp4, mov, mkv, or webm file first."); return; }
+    if (isSameLocalFile(file, audioFile)) {
+      setAudioFile(null);
+      setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
+      setStatus("The optional audio file must be a separate audio track, not the same file as the video. I removed it; click Upload Existing Video again.");
+      return;
+    }
     setBusy(true);
     setProgress({ percent: 0, loadedBytes: 0, totalBytes: file.size, speedBytesPerSecond: 0, etaSeconds: null, state: "preparing" });
     setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: audioFile?.size ?? 0, speedBytesPerSecond: 0, etaSeconds: null, state: audioFile ? "preparing" : "idle" });
@@ -466,6 +476,7 @@ export function UploadClient() {
 
     try {
       if (!auth.session?.access_token) throw new Error("Checking your sign-in. Try again in a moment.");
+      const accessToken = auth.session.access_token;
       setProgress((current) => ({ ...current, state: "preparing" }));
       setStatus(selectedProjectId === "new" ? "Creating project..." : "Preparing selected project...");
       const created = await resolveProject(file);
@@ -476,11 +487,11 @@ export function UploadClient() {
       const signed = await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType }),
-      }, auth.session.access_token);
+      }, accessToken);
       const signedAudio = audioFile && audioContentType ? await apiFetch<SignedUpload>("/uploads/create-signed-url", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: audioFile.name, contentType: audioContentType }),
-      }, auth.session.access_token) : null;
+      }, accessToken) : null;
 
       setStatus("Uploading directly to Cloudflare R2...");
       await uploadToSignedUrl(file, signed, contentType, setProgress);
@@ -495,7 +506,7 @@ export function UploadClient() {
       const verification = await apiFetch<UploadVerificationResponse>("/uploads/verify", {
         method: "POST",
         body: JSON.stringify({ projectId: created.project.id, filename: file.name, contentType, storageKey: signed.key, sizeBytes: file.size }),
-      }, auth.session.access_token);
+      }, accessToken);
       if (audioFile && verification.media?.has_audio === true) {
         const shouldOverrideAudio = window.confirm("This video already contains audio. Do you want to replace the video's audio with the separate audio file for package production?");
         if (!shouldOverrideAudio) {
@@ -507,7 +518,7 @@ export function UploadClient() {
       }
 
       setStatus("Saving video record...");
-      const completed = await apiFetch<CompletedUpload>("/uploads/complete", {
+      const completeUpload = (includeAudioSource: boolean) => apiFetch<CompletedUpload>("/uploads/complete", {
         method: "POST",
         body: JSON.stringify({
           projectId: created.project.id,
@@ -515,20 +526,32 @@ export function UploadClient() {
           contentType,
           storageKey: signed.key,
           sizeBytes: file.size,
-          audio_source: audioFile && signedAudio && audioContentType ? {
+          audio_source: includeAudioSource && audioFile && signedAudio && audioContentType ? {
             object_key: signedAudio.key,
             filename: audioFile.name,
             content_type: audioContentType,
             size_bytes: audioFile.size,
           } : undefined,
         }),
-      }, auth.session.access_token);
+      }, accessToken);
+      let audioSourceSkipped = false;
+      let completed: CompletedUpload;
+      try {
+        completed = await completeUpload(true);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        if (!message.includes("audio_sidecar_missing_audio")) throw error;
+        setStatus("Optional audio did not contain an audio stream, so VideoBlitzer is saving the video without that sidecar.");
+        audioSourceSkipped = true;
+        completed = await completeUpload(false);
+      }
 
       setProgress((current) => ({ ...current, state: "complete" }));
-      if (audioFile) setAudioProgress((current) => ({ ...current, state: "complete" }));
+      if (audioFile) setAudioProgress((current) => ({ ...current, state: audioSourceSkipped ? "skipped" : "complete" }));
       setUploadedVideo(completed.video);
       setDuplicate(completed.duplicate ?? null);
-      const nextStatus = completed.duplicate ? "This video appears to match a previous upload." : completed.video.has_video === true ? "Upload verified. Ready to produce package." : "This file contains audio only. Social media video packages require a video stream.";
+      const audioSkipNote = audioSourceSkipped ? " Optional audio was ignored because it had no audio stream." : "";
+      const nextStatus = completed.duplicate ? `This video appears to match a previous upload.${audioSkipNote}` : completed.video.has_video === true ? `Upload verified. Ready to produce package.${audioSkipNote}` : "This file contains audio only. Social media video packages require a video stream.";
       const nextProjectUrl = `/projects/${created.project.id}/social-production`;
       setStatus(nextStatus);
       setProjectUrl(nextProjectUrl);
@@ -826,13 +849,31 @@ export function UploadClient() {
         {selectedProjectId === "new" && <><br /><br /><input className="input" value={title} onChange={(event) => setTitle(event.target.value)} placeholder="Project title" /></>}
         <br /><br />
         <label>Video file</label>
-        <input className="input" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => setFile(event.target.files?.[0] ?? null)} />
+        <input className="input" type="file" accept=".mp4,.mov,.mkv,.webm,video/mp4,video/quicktime,video/x-matroska,video/webm" onChange={(event) => {
+          const nextFile = event.target.files?.[0] ?? null;
+          setFile(nextFile);
+          if (isSameLocalFile(nextFile, audioFile)) {
+            setAudioFile(null);
+            setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
+            setStatus("Removed optional audio because it matched the selected video. Use this field only for a separate audio track.");
+          }
+        }} />
         {file && <p className="muted">Selected: {file.name} · {(file.size / 1024 / 1024).toFixed(1)} MB</p>}
         <br /><br />
         <label>Optional separate audio file</label>
-        <input className="input" type="file" accept=".mp3,.mp4,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,video/mp4" onChange={(event) => setAudioFile(event.target.files?.[0] ?? null)} />
+        <input className="input" type="file" accept=".mp3,.mp4,.wav,.m4a,.aac,.ogg,.flac,.webm,audio/mpeg,audio/wav,audio/x-wav,audio/mp4,audio/aac,audio/ogg,audio/flac,audio/webm,video/mp4" onChange={(event) => {
+          const nextAudioFile = event.target.files?.[0] ?? null;
+          if (isSameLocalFile(file, nextAudioFile)) {
+            event.currentTarget.value = "";
+            setAudioFile(null);
+            setAudioProgress({ percent: 0, loadedBytes: 0, totalBytes: 0, speedBytesPerSecond: 0, etaSeconds: null, state: "skipped" });
+            setStatus("That is the same file as the video. Optional audio must be a separate audio track, so it was not attached.");
+            return;
+          }
+          setAudioFile(nextAudioFile);
+        }} />
         {audioFile && <p className="muted">Optional audio: {audioFile.name} · {(audioFile.size / 1024 / 1024).toFixed(1)} MB</p>}
-        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is merged with the video by the package worker.</p>
+        <p className="muted">After upload reaches 100%, VideoBlitzer verifies the video and optional audio objects before enabling package production. Optional audio is only for a separate audio track; if your video already has audio, leave this empty.</p>
         {audioFile && <p className="warning">If the video already contains audio, VideoBlitzer will ask before replacing it with this separate audio file.</p>}
         <button className="button" onClick={startUpload} disabled={busy}>{busy ? "Uploading..." : "Upload Existing Video"}</button>
         <p className={progress.state === "failed" ? "warning" : progress.state === "complete" ? "status" : "muted"}>{status}</p>
