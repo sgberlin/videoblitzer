@@ -303,11 +303,11 @@ function DuplicateDetectedPanel({
   const originalProjectId = duplicate.originalProject?.id;
   return <div className="card">
     <h3>This Video Was Already Uploaded</h3>
-    <p className="status">You can download the previous ZIP, or create a new package using the recipe above.</p>
-    <p className="muted">The source video was uploaded{duplicate.originalProject?.created_at ? ` on ${new Date(duplicate.originalProject.created_at).toLocaleDateString()}` : ""}. Creating a new package reuses saved analysis when available, but applies your current captions, match-data, audio, and recipe settings.</p>
+    <p className="status">Choose whether to download the old ZIP or apply the current recipe to this same source video.</p>
+    <p className="muted">The source video was uploaded{duplicate.originalProject?.created_at ? ` on ${new Date(duplicate.originalProject.created_at).toLocaleDateString()}` : ""}. Creating a new package reuses saved analysis when available, but applies the package recipe currently shown on this page.</p>
     <p><strong>Original project:</strong> {duplicate.originalProject?.title ?? "Previous project"}</p>
     <p className="muted">Packages: {duplicate.packageCount} total · {duplicate.completedPackageCount} completed · Last package: {duplicate.lastPackageCreatedAt ? new Date(duplicate.lastPackageCreatedAt).toLocaleString() : "none yet"}</p>
-    <button className="button" disabled={busy} onClick={onCustom}>Create New Package With Current Recipe</button>
+    <button className="button" disabled={busy} onClick={onCustom}>Apply Current Recipe to This Video</button>
     <button className="button secondary" disabled={busy || !completedJob?.id} onClick={onReuse}>Download Previous Package</button>
     {originalProjectId && <a className="button secondary" href={`/projects/${originalProjectId}/social-production`}>Open Original Project</a>}
     {!completedJob?.id && <p className="warning">No completed previous package exists yet. Create a new package with the current recipe instead.</p>}
@@ -779,7 +779,7 @@ export function UploadClient() {
   function renderPackageOptionsPanel() {
     return <div className="card">
       <h3>Package Recipe</h3>
-      <p className="muted">These settings apply when you create a new package. Downloading a previous package keeps the old ZIP unchanged.</p>
+      <p className="muted">Set this before or after upload. These settings apply whenever you create a new package. Downloading a previous package keeps the old ZIP unchanged.</p>
       <div className="card">
         <h3>What You'll Get</h3>
         <p className="status">16:9 match highlights · target 15-20 minutes</p>
@@ -878,7 +878,7 @@ export function UploadClient() {
           </>}
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
-        {uploadedVideo && renderPackageOptionsPanel()}
+        {renderPackageOptionsPanel()}
         {uploadedVideo && duplicate && <DuplicateDetectedPanel duplicate={duplicate} busy={packageBusy} onReuse={() => void reuseExistingPackage()} onCustom={() => void createCustomPackage()} />}
         {uploadedVideo && !duplicate && <div className="card">
           <h3>3. Create Package</h3>
@@ -895,8 +895,8 @@ export function UploadClient() {
         </div>}
       </div>
       <div className="card">
-        <h3>Package Creation</h3>
-        <p className="muted">After upload verification, click Produce Package and watch each processing stage here. Keep this page open to follow long game videos through ZIP creation.</p>
+        <h3>Package Result</h3>
+        <p className="muted">Create a package with the current recipe, then watch progress and download the ZIP here. Keep this page open to follow long game videos through ZIP creation.</p>
         {uploadedVideo && <p className="status">Current work is saved. You can refresh and continue from this package state.</p>}
         <PackageProgressPanel job={packageJob} onDownload={() => void downloadPackageZip()} downloadBusy={downloadBusy} />
         {projectUrl && <p><a className="button secondary" href={projectUrl}>Open Social Media Production</a></p>}
