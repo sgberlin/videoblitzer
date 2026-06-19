@@ -675,14 +675,10 @@ export function UploadClient() {
 
   async function createCustomPackage() {
     if (!auth.session?.access_token || !uploadedVideo) return;
-    const targetPlatform = window.prompt("Target platform (TikTok, Instagram Reels, YouTube Shorts, YouTube, Facebook)", "TikTok") ?? "";
-    if (!targetPlatform.trim()) return;
-    const numberOfClips = Number(window.prompt("Number of clips", "6") ?? "6");
-    const includeCaptions = window.confirm("Include captions?");
     setPackageBusy(true);
     try {
       const options = buildPackageOptions();
-      await confirmMatchDataForPackage(uploadedVideo.project_id, { ...options, includeCaptions });
+      await confirmMatchDataForPackage(uploadedVideo.project_id, options);
       const response = await apiFetch<PackageJobResponse>("/packages/generate-custom", {
         method: "POST",
         body: JSON.stringify({
@@ -691,12 +687,11 @@ export function UploadClient() {
           packageMode: "fast",
           packageOptions: {
             ...options,
-            targetPlatform,
+            targetPlatform: options.outputs.join(", "),
             tonePreset: "high_energy",
             clipDurationPreference: "short",
-            numberOfClips: Number.isFinite(numberOfClips) ? numberOfClips : 6,
-            includeCaptions,
-            outputs: ["vertical", "landscape", "square"],
+            numberOfClips: 8,
+            includeCaptions: options.includeCaptions,
             focusType: "big_plays",
           },
         }),
@@ -783,6 +778,37 @@ export function UploadClient() {
     }
   }
 
+  function renderPackageOptionsPanel() {
+    return <div className="card">
+      <h3>Package Options</h3>
+      <label><input type="checkbox" checked={packageOptions.includeMaster} onChange={(event) => setPackageOptions((current) => ({ ...current, includeMaster: event.target.checked }))} /> Master video</label><br />
+      <label><input type="checkbox" checked={packageOptions.useMatchData} onChange={(event) => setPackageOptions((current) => ({ ...current, useMatchData: event.target.checked }))} /> Use match data for clip timing</label><br />
+      <label><input type="checkbox" checked={packageOptions.includeGoalClips} onChange={(event) => setPackageOptions((current) => ({ ...current, includeGoalClips: event.target.checked }))} /> Goal clips with buildup</label><br />
+      <label><input type="checkbox" checked={packageOptions.includeKeyMoments} onChange={(event) => setPackageOptions((current) => ({ ...current, includeKeyMoments: event.target.checked }))} /> Other key moments</label><br />
+      <label><input type="checkbox" checked={packageOptions.outputs.includes("vertical")} onChange={(event) => toggleOutput("vertical", event.target.checked)} /> Vertical clips</label><br />
+      <label><input type="checkbox" checked={packageOptions.outputs.includes("landscape")} onChange={(event) => toggleOutput("landscape", event.target.checked)} /> Landscape clips</label><br />
+      <label><input type="checkbox" checked={packageOptions.outputs.includes("square")} onChange={(event) => toggleOutput("square", event.target.checked)} /> Square clips</label><br />
+      <label><input type="checkbox" checked={packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, includeCaptions: event.target.checked, burnCaptions: event.target.checked ? current.burnCaptions : false }))} /> Captions</label><br />
+      <label><input type="checkbox" checked={packageOptions.burnCaptions} disabled={!packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, burnCaptions: event.target.checked }))} /> Burn captions into clips</label><br />
+      <label><input type="checkbox" checked={packageOptions.subtleZoom} onChange={(event) => setPackageOptions((current) => ({ ...current, subtleZoom: event.target.checked }))} /> Subtle zoom/crop</label>
+      <br /><br />
+      <label>Goal buildup seconds</label>
+      <input className="input" type="number" min={60} value={packageOptions.goalRunupSeconds} onChange={(event) => setPackageOptions((current) => ({ ...current, goalRunupSeconds: Number(event.target.value) }))} />
+      <br /><br />
+      <label>Match lookup for event timing</label>
+      <div className="grid grid-2">
+        <input className="input" value={matchTeamA} onChange={(event) => setMatchTeamA(event.target.value)} placeholder="Team A" />
+        <input className="input" value={matchTeamB} onChange={(event) => setMatchTeamB(event.target.value)} placeholder="Team B" />
+        <input className="input" value={matchLeague} onChange={(event) => setMatchLeague(event.target.value)} placeholder="League (optional)" />
+        <input className="input" type="date" value={matchDate} onChange={(event) => setMatchDate(event.target.value)} />
+      </div>
+      <br />
+      <label>Video kickoff second</label>
+      <input className="input" type="number" min={0} value={packageOptions.videoKickoffSecond} onChange={(event) => setPackageOptions((current) => ({ ...current, videoKickoffSecond: Number(event.target.value) }))} />
+      <p className="muted">If the video starts before kickoff, set the video second where match time 0:00 begins. Add match teams/date to fetch factual event minutes before package creation.</p>
+    </div>;
+  }
+
   if (auth.status === "loading" || authStatus === "loading") return <AuthStatusMessage status="loading" />;
   if (authStatus !== "authenticated") return <AuthStatusMessage status={authStatus} error={auth.error} />;
 
@@ -824,6 +850,7 @@ export function UploadClient() {
           </>}
           {progress.state === "failed" && <p className="warning">Failed upload can be retried safely. The next attempt requests a fresh signed URL and verifies the new R2 object before package creation.</p>}
         </div>
+        {uploadedVideo && renderPackageOptionsPanel()}
         {uploadedVideo && duplicate && <DuplicateDetectedPanel duplicate={duplicate} busy={packageBusy} onReuse={() => void reuseExistingPackage()} onAlternative={(variant) => void createAlternativePackage(variant)} onCustom={() => void createCustomPackage()} />}
         {uploadedVideo && !duplicate && <div className="card">
           <h3>Produce Package</h3>
@@ -833,34 +860,6 @@ export function UploadClient() {
           <p className="muted">Has video: {uploadedVideo.has_video === true ? "yes" : "no"} · Has audio: {uploadedVideo.has_audio === true ? "yes" : "no"}</p>
           {audioFile && <p className="status">Separate audio uploaded. The package worker will replace the video's original audio with this track before creating clips and exports.</p>}
           <p className="muted">Duration: {typeof uploadedVideo.duration_seconds === "number" ? `${uploadedVideo.duration_seconds.toFixed(1)}s` : "unknown"} · Resolution: {uploadedVideo.width && uploadedVideo.height ? `${uploadedVideo.width}x${uploadedVideo.height}` : "none"} · Codec: {uploadedVideo.video_codec ?? "no video"} / {uploadedVideo.audio_codec ?? "no audio"}</p>
-          <div className="card">
-            <h3>Package Options</h3>
-            <label><input type="checkbox" checked={packageOptions.includeMaster} onChange={(event) => setPackageOptions((current) => ({ ...current, includeMaster: event.target.checked }))} /> Master video</label><br />
-            <label><input type="checkbox" checked={packageOptions.useMatchData} onChange={(event) => setPackageOptions((current) => ({ ...current, useMatchData: event.target.checked }))} /> Use match data for clip timing</label><br />
-            <label><input type="checkbox" checked={packageOptions.includeGoalClips} onChange={(event) => setPackageOptions((current) => ({ ...current, includeGoalClips: event.target.checked }))} /> Goal clips with buildup</label><br />
-            <label><input type="checkbox" checked={packageOptions.includeKeyMoments} onChange={(event) => setPackageOptions((current) => ({ ...current, includeKeyMoments: event.target.checked }))} /> Other key moments</label><br />
-            <label><input type="checkbox" checked={packageOptions.outputs.includes("vertical")} onChange={(event) => toggleOutput("vertical", event.target.checked)} /> Vertical clips</label><br />
-            <label><input type="checkbox" checked={packageOptions.outputs.includes("landscape")} onChange={(event) => toggleOutput("landscape", event.target.checked)} /> Landscape clips</label><br />
-            <label><input type="checkbox" checked={packageOptions.outputs.includes("square")} onChange={(event) => toggleOutput("square", event.target.checked)} /> Square clips</label><br />
-            <label><input type="checkbox" checked={packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, includeCaptions: event.target.checked, burnCaptions: event.target.checked ? current.burnCaptions : false }))} /> Captions</label><br />
-            <label><input type="checkbox" checked={packageOptions.burnCaptions} disabled={!packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, burnCaptions: event.target.checked }))} /> Burn captions into clips</label><br />
-            <label><input type="checkbox" checked={packageOptions.subtleZoom} onChange={(event) => setPackageOptions((current) => ({ ...current, subtleZoom: event.target.checked }))} /> Subtle zoom/crop</label>
-            <br /><br />
-            <label>Goal buildup seconds</label>
-            <input className="input" type="number" min={60} value={packageOptions.goalRunupSeconds} onChange={(event) => setPackageOptions((current) => ({ ...current, goalRunupSeconds: Number(event.target.value) }))} />
-            <br /><br />
-            <label>Match lookup for event timing</label>
-            <div className="grid grid-2">
-              <input className="input" value={matchTeamA} onChange={(event) => setMatchTeamA(event.target.value)} placeholder="Team A" />
-              <input className="input" value={matchTeamB} onChange={(event) => setMatchTeamB(event.target.value)} placeholder="Team B" />
-              <input className="input" value={matchLeague} onChange={(event) => setMatchLeague(event.target.value)} placeholder="League (optional)" />
-              <input className="input" type="date" value={matchDate} onChange={(event) => setMatchDate(event.target.value)} />
-            </div>
-            <br />
-            <label>Video kickoff second</label>
-            <input className="input" type="number" min={0} value={packageOptions.videoKickoffSecond} onChange={(event) => setPackageOptions((current) => ({ ...current, videoKickoffSecond: Number(event.target.value) }))} />
-            <p className="muted">If the video starts before kickoff, set the video second where match time 0:00 begins. Add match teams/date to fetch factual event minutes before package creation.</p>
-          </div>
           <button className="button" onClick={() => void producePackage("fast")} disabled={packageBusy || uploadedVideo.has_video !== true}>{packageBusy ? "Queueing..." : "Produce Fast Package"}</button>
           <button className="button secondary" onClick={() => void producePackage("high_quality")} disabled={packageBusy || uploadedVideo.has_video !== true}>High Quality Package</button>
           {projectUrl && <a className="button secondary" href={projectUrl}>Open Social Media Production</a>}
