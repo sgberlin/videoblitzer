@@ -31,6 +31,7 @@ type PackageOptions = {
   includeCaptions: boolean;
   burnCaptions: boolean;
   subtleZoom: boolean;
+  voiceModulation: boolean;
   outputs: Array<"vertical" | "landscape" | "square">;
   goalRunupSeconds: number;
   videoKickoffSecond: number;
@@ -70,15 +71,16 @@ type ArchivedUploadSession = SavedUploadSession & {
 const savedUploadSessionKey = "videoblitzer.upload.resume.v1";
 const archivedUploadSessionsKey = "videoblitzer.upload.archives.v1";
 const defaultPackageOptions: PackageOptions = {
-  includeMaster: true,
+  includeMaster: false,
   includeGoalClips: true,
   includeKeyMoments: true,
   useMatchData: true,
   includeCaptions: true,
   burnCaptions: false,
   subtleZoom: true,
-  outputs: ["vertical", "landscape", "square"],
-  goalRunupSeconds: 75,
+  voiceModulation: true,
+  outputs: ["landscape", "vertical"],
+  goalRunupSeconds: 120,
   videoKickoffSecond: 0,
 };
 
@@ -88,8 +90,8 @@ const packageStages = [
   { key: "normalize_master", label: "Merging and normalizing media", start: 25, end: 40 },
   { key: "analyze", label: "Detecting highlights", start: 40, end: 55 },
   { key: "final_edit", label: "Building condensed final video", start: 50, end: 55 },
-  { key: "rendering_clips", label: "Creating social clips", start: 55, end: 70 },
-  { key: "preset_exports", label: "Creating export presets", start: 70, end: 82 },
+  { key: "rendering_clips", label: "Building 9:16 goal reel", start: 55, end: 70 },
+  { key: "preset_exports", label: "Rendering final videos", start: 70, end: 82 },
   { key: "validating_assets", label: "Validating generated assets", start: 82, end: 90 },
   { key: "building_zip", label: "Building ZIP package", start: 90, end: 100 },
   { key: "completed", label: "Complete", start: 100, end: 100 },
@@ -98,8 +100,8 @@ const packageStages = [
 const slowStageNotes: Record<string, string> = {
   normalize_master: "This is usually the slowest first step because FFmpeg is rebuilding the full master video and replacing/normalizing audio.",
   final_edit: "This creates the condensed final video from goals, key moments, and context sequences.",
-  rendering_clips: "This can take time because each social clip is rendered into multiple platform sizes.",
-  preset_exports: "This can take time because full export presets are being encoded.",
+  rendering_clips: "This creates the vertical goals reel, or missed-goals/big-chances reel if there are no goals.",
+  preset_exports: "This renders the 16:9 highlights video and the 9:16 reel.",
   building_zip: "Large packages take longer while files are collected and compressed.",
 };
 
@@ -781,16 +783,14 @@ export function UploadClient() {
   function renderPackageOptionsPanel() {
     return <div className="card">
       <h3>Package Options</h3>
-      <label><input type="checkbox" checked={packageOptions.includeMaster} onChange={(event) => setPackageOptions((current) => ({ ...current, includeMaster: event.target.checked }))} /> Master video</label><br />
+      <p className="muted">Package output is fixed: one 16:9 highlights edit and one 9:16 goals/big-chance reel. If separate audio was uploaded, the merged master is added automatically.</p>
       <label><input type="checkbox" checked={packageOptions.useMatchData} onChange={(event) => setPackageOptions((current) => ({ ...current, useMatchData: event.target.checked }))} /> Use match data for clip timing</label><br />
       <label><input type="checkbox" checked={packageOptions.includeGoalClips} onChange={(event) => setPackageOptions((current) => ({ ...current, includeGoalClips: event.target.checked }))} /> Goal clips with buildup</label><br />
       <label><input type="checkbox" checked={packageOptions.includeKeyMoments} onChange={(event) => setPackageOptions((current) => ({ ...current, includeKeyMoments: event.target.checked }))} /> Other key moments</label><br />
-      <label><input type="checkbox" checked={packageOptions.outputs.includes("vertical")} onChange={(event) => toggleOutput("vertical", event.target.checked)} /> Vertical clips</label><br />
-      <label><input type="checkbox" checked={packageOptions.outputs.includes("landscape")} onChange={(event) => toggleOutput("landscape", event.target.checked)} /> Landscape clips</label><br />
-      <label><input type="checkbox" checked={packageOptions.outputs.includes("square")} onChange={(event) => toggleOutput("square", event.target.checked)} /> Square clips</label><br />
       <label><input type="checkbox" checked={packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, includeCaptions: event.target.checked, burnCaptions: event.target.checked ? current.burnCaptions : false }))} /> Captions</label><br />
       <label><input type="checkbox" checked={packageOptions.burnCaptions} disabled={!packageOptions.includeCaptions} onChange={(event) => setPackageOptions((current) => ({ ...current, burnCaptions: event.target.checked }))} /> Burn captions into clips</label><br />
-      <label><input type="checkbox" checked={packageOptions.subtleZoom} onChange={(event) => setPackageOptions((current) => ({ ...current, subtleZoom: event.target.checked }))} /> Subtle zoom/crop</label>
+      <label><input type="checkbox" checked={packageOptions.subtleZoom} onChange={(event) => setPackageOptions((current) => ({ ...current, subtleZoom: event.target.checked }))} /> Subtle zoom/crop</label><br />
+      <label><input type="checkbox" checked={packageOptions.voiceModulation} onChange={(event) => setPackageOptions((current) => ({ ...current, voiceModulation: event.target.checked }))} /> Light voice modulation</label>
       <br /><br />
       <label>Goal buildup seconds</label>
       <input className="input" type="number" min={60} value={packageOptions.goalRunupSeconds} onChange={(event) => setPackageOptions((current) => ({ ...current, goalRunupSeconds: Number(event.target.value) }))} />

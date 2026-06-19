@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { analyzeStage, probeDurationSeconds } from "./analyzeStage";
 import { bundleStage, uploadPackageZip } from "./bundleStage";
-import { createFastNormalizedMaster, createFastNormalizedMasterWithAudio, createFinalEdit, createNormalizedMaster, createNormalizedMasterWithAudio, exportStage, socialClipStage } from "./exportStage";
+import { createFastNormalizedMaster, createFastNormalizedMasterWithAudio, createFinalEdit, createNormalizedMaster, createNormalizedMasterWithAudio, exportStage } from "./exportStage";
 import { downloadR2File, uploadFileToR2, verifyR2File } from "./packageStorage";
 import type { ExportArtifact, PackageJob, PackageManifest, PackageStatus, VideoRow } from "./packageTypes";
 
@@ -138,21 +138,8 @@ function optionNumber(options: Record<string, unknown>, key: string, fallback: n
   return Number.isFinite(value) ? value : fallback;
 }
 
-function packageOutputs(options: Record<string, unknown>) {
-  const raw = Array.isArray(options.outputs) ? options.outputs.map(String) : ["vertical", "landscape", "square"];
-  const allowed = new Set(["vertical", "landscape", "square"]);
-  const outputs = raw.filter((item) => allowed.has(item));
-  return outputs.length ? outputs : ["vertical", "landscape", "square"];
-}
-
-function presetIdsForOutputs(options: Record<string, unknown>, requestedPresetIds: string[]) {
-  if (requestedPresetIds.length) return requestedPresetIds;
-  const ids: string[] = [];
-  const outputs = new Set(packageOutputs(options));
-  if (outputs.has("landscape")) ids.push("youtube_16_9_1080p");
-  if (outputs.has("vertical")) ids.push("shorts_9_16_1080x1920");
-  if (outputs.has("square")) ids.push("square_1_1_1080");
-  return ids;
+function presetIdsForOutputs(_options: Record<string, unknown>, _requestedPresetIds: string[]) {
+  return ["youtube_16_9_1080p"];
 }
 
 type MatchTimelineEvent = {
@@ -228,8 +215,10 @@ function clipPlanFromMatchEvents(events: MatchTimelineEvent[], durationSeconds: 
   if (!optionBoolean(options, "useMatchData", true)) return [];
   const includeGoals = optionBoolean(options, "includeGoalClips", true);
   const includeKeyMoments = optionBoolean(options, "includeKeyMoments", true);
-  const goalRunup = Math.max(60, optionNumber(options, "goalRunupSeconds", 75));
-  const keyRunup = Math.max(20, optionNumber(options, "keyMomentRunupSeconds", 40));
+  const goalRunup = Math.max(120, optionNumber(options, "goalRunupSeconds", 120));
+  const keyRunup = Math.max(60, optionNumber(options, "keyMomentRunupSeconds", 120));
+  const goalAftermath = Math.max(60, optionNumber(options, "goalAftermathSeconds", 60));
+  const keyAftermath = Math.max(45, optionNumber(options, "keyMomentAftermathSeconds", 60));
   const safeDuration = Math.max(1, durationSeconds || 1);
 
   return events
@@ -243,7 +232,7 @@ function clipPlanFromMatchEvents(events: MatchTimelineEvent[], durationSeconds: 
       const goal = isGoalEvent(event);
       const eventSecond = eventVideoSecond(event, options);
       const startSeconds = Math.max(0, eventSecond - (goal ? goalRunup : keyRunup));
-      const endSeconds = Math.min(safeDuration, eventSecond + (goal ? 25 : 18));
+      const endSeconds = Math.min(safeDuration, eventSecond + (goal ? goalAftermath : keyAftermath));
       const player = event.player ? ` - ${event.player}` : "";
       const team = event.team ? ` (${event.team})` : "";
       const minute = `${event.minute}${event.stoppageMinute ? `+${event.stoppageMinute}` : ""}'`;
@@ -340,6 +329,44 @@ function finalEditClipPlan(clipPlan: PackageManifest["clipPlan"], durationSecond
     total += Math.min(duration, remaining);
   }
   return { clipPlan: selected.filter((clip) => clip.endSeconds > clip.startSeconds), targetDuration };
+}
+
+function clipText(clip: PackageManifest["clipPlan"][number]) {
+  return [clip.label, clip.note, clip.reason].filter(Boolean).join(" ").toLowerCase();
+}
+
+function isGoalClip(clip: PackageManifest["clipPlan"][number]) {
+  const text = clipText(clip);
+  return text.includes("goal") || text.includes("penalty scored");
+}
+
+function isVerticalFallbackClip(clip: PackageManifest["clipPlan"][number]) {
+  const text = clipText(clip);
+  return text.includes("miss") || text.includes("big chance") || text.includes("shot on target") || text.includes("penalty") || text.includes("save");
+}
+
+function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSeconds: number) {
+  const goals = clipPlan.filter(isGoalClip);
+  const source = goals.length ? goals : clipPlan.filter(isVerticalFallbackClip);
+  const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, 6);
+  return selected.map((clip, index) => {
+    const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(120, (clip.endSeconds - clip.startSeconds) * 0.7)));
+    const startSeconds = Math.max(0, center - 120);
+    const endSeconds = Math.min(durationSeconds, center + 60);
+    return {
+      ...clip,
+      id: `vertical-reel-${index + 1}-${clip.id}`,
+      startSeconds,
+      endSeconds: Math.max(endSeconds, Math.min(durationSeconds, startSeconds + 45)),
+      reason: `${clip.reason} Included in the 9:16 goals/big-chance reel with action-safe framing.`,
+      platformFit: ["instagram_reels", "tiktok", "youtube_shorts", "facebook_reels"],
+    };
+  }).filter((clip) => clip.endSeconds > clip.startSeconds);
+}
+
+function voiceModulationFilter(options: Record<string, unknown>) {
+  if (options.voiceModulation === false) return undefined;
+  return "asetrate=48000*1.03,aresample=48000,atempo=0.9709,equalizer=f=3000:t=q:w=1:g=1.5,loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function isSchemaCacheMissingColumn(error: unknown) {
@@ -825,7 +852,7 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
 }
 
 function readmeForPackage(manifest: PackageManifest) {
-  return `VideoBlitzer Social Media Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nFolders:\n- clips/vertical_9x16: Instagram Reels, TikTok, YouTube Shorts, Facebook Reels\n- clips/landscape_16x9: YouTube standard and landscape assets\n- clips/square_1x1: optional square social clips\n- captions/srt: social hook caption files\n- thumbnails: preview images\n- metadata: titles, descriptions, captions, hashtags\n- manifest.json: machine-readable package details\n\nQuality note:\nCandidate clips include confidence scores and reasons. Low-confidence clips should be reviewed before posting.\n`;
+  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n\nQuality note:\nThe 16:9 edit prioritizes goals, penalties, big chances, red cards, VAR, saves, and late drama. The 9:16 edit is intentionally narrower and action-safe for goal/big-chance moments.\n`;
 }
 
 async function processPackageJob(client: WorkerClient, job: PackageJob) {
@@ -844,17 +871,16 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const mode = packageMode(job);
     const variant = packageVariant(job);
     const options = packageOptions(job);
-    const outputs = packageOutputs(options);
-    const includeMaster = optionBoolean(options, "includeMaster", true);
+    const includeMaster = Boolean(audioSourceObjectKey);
     const includeCaptions = optionBoolean(options, "includeCaptions", true);
-    const burnCaptions = includeCaptions && optionBoolean(options, "burnCaptions", false);
-    const subtleZoom = optionBoolean(options, "subtleZoom", true);
+    const voiceFilter = voiceModulationFilter(options);
     const useFastCopyMaster = mode === "fast" && canCopyVideoForFastMaster(video, job);
 
     const sourcePath = path.join(workdir, "source-input");
     const audioSourcePath = path.join(workdir, "audio-sidecar-input");
     const normalizedMasterPath = path.join(workdir, "normalized-master.mp4");
     const finalEditPath = path.join(workdir, "final-edit.mp4");
+    const verticalEditPath = path.join(workdir, "vertical-goals-reel.mp4");
     const exportsDir = path.join(workdir, "exports");
     await mkdir(exportsDir, { recursive: true });
 
@@ -942,41 +968,50 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       workdir,
       hasAudio: hasAudioForExports,
       onProgress: reportFinalEditProgress,
+      audioFilter: voiceFilter,
     }));
 
-    await markStage(client, job, "rendering_clips", 55, { clipPlanCount: analysis.clipPlan.length });
+    const verticalClipPlan = verticalReelClipPlan(analysis.clipPlan, analysis.durationSeconds);
+    await markStage(client, job, "rendering_clips", 55, { verticalClipCount: verticalClipPlan.length });
     const reportClipProgress = stageProgressReporter({ client, job, stage: "rendering_clips", startProgress: 55, endProgress: 70 });
-    const { clipArtifacts, thumbnailArtifacts } = await withHeartbeat(client, job, "rendering_clips", () => socialClipStage({
+    const verticalEdit = await withHeartbeat(client, job, "rendering_clips", () => createFinalEdit({
       masterPath: normalizedMasterPath,
+      outputPath: verticalEditPath,
+      clipPlan: verticalClipPlan,
       workdir,
-      clipPlan: analysis.clipPlan,
-      userId: job.user_id,
-      projectId: job.project_id,
-      packageJobId: job.id,
       hasAudio: hasAudioForExports,
       onProgress: reportClipProgress,
-      fastMode: mode === "fast",
-      clipRenderConcurrency: mode === "fast" ? Number(process.env.PACKAGE_FAST_CLIP_CONCURRENCY ?? 2) : 1,
-      outputs,
-      subtleZoom,
-      burnCaptions,
+      audioFilter: voiceFilter,
     }));
 
-    await markStage(client, job, "preset_exports", 70, { clipAssetCount: clipArtifacts.length });
+    await markStage(client, job, "preset_exports", 70, { exportPlan: "one 16:9 highlights video and one 9:16 goals reel" });
     const requestedPresetIds = Array.isArray(job.input?.presetIds) ? (job.input?.presetIds as string[]) : [];
-    const selectedPresetIds = presetIdsForOutputs(options, requestedPresetIds);
     const reportExportProgress = stageProgressReporter({ client, job, stage: "preset_exports", startProgress: 70, endProgress: 82 });
-    const exportArtifactsWithPaths = await withHeartbeat(client, job, "preset_exports", () => exportStage({
-      masterPath: finalEditPath,
-      exportsDir,
-      requestedPresetIds: selectedPresetIds,
-      userId: job.user_id,
-      projectId: job.project_id,
-      packageJobId: job.id,
-      hasAudio: hasAudioForExports,
-      durationSeconds: finalEdit.durationSeconds,
-      onProgress: reportExportProgress,
-    }));
+    const exportArtifactsWithPaths = await withHeartbeat(client, job, "preset_exports", async () => {
+      const landscape = await exportStage({
+        masterPath: finalEditPath,
+        exportsDir,
+        requestedPresetIds: presetIdsForOutputs(options, requestedPresetIds),
+        userId: job.user_id,
+        projectId: job.project_id,
+        packageJobId: job.id,
+        hasAudio: hasAudioForExports,
+        durationSeconds: finalEdit.durationSeconds,
+        onProgress: (progress) => reportExportProgress({ ...progress, percent: Math.round(progress.percent * 0.5), label: `16:9 highlights ${progress.label ?? ""}`.trim(), current: 1, total: 2 }),
+      });
+      const vertical = await exportStage({
+        masterPath: verticalEditPath,
+        exportsDir,
+        requestedPresetIds: ["shorts_9_16_1080x1920"],
+        userId: job.user_id,
+        projectId: job.project_id,
+        packageJobId: job.id,
+        hasAudio: hasAudioForExports,
+        durationSeconds: verticalEdit.durationSeconds,
+        onProgress: (progress) => reportExportProgress({ ...progress, percent: 50 + Math.round(progress.percent * 0.5), label: `9:16 goal reel ${progress.label ?? ""}`.trim(), current: 2, total: 2 }),
+      });
+      return [...landscape, ...vertical];
+    });
     const exportArtifacts = exportArtifactsWithPaths.map(({ filePath: _filePath, ...artifact }) => artifact);
     await persistExports(client, job, exportArtifacts);
 
@@ -984,8 +1019,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const textAssets = includeCaptions ? await createTextAssets({ workdir, job, clipPlan: analysis.clipPlan, socialPackage }) : [];
     await persistSocialPackage(client, job, socialPackage);
 
-    await markStage(client, job, "validating_assets", 82, { exportCount: exportArtifacts.length, clipAssetCount: clipArtifacts.length });
-    const assetsWithPaths = [...(includeMaster ? [masterAsset] : []), ...exportArtifactsWithPaths, ...clipArtifacts, ...thumbnailArtifacts, ...textAssets];
+    await markStage(client, job, "validating_assets", 82, { exportCount: exportArtifacts.length, includeMaster });
+    const assetsWithPaths = [...(includeMaster ? [masterAsset] : []), ...exportArtifactsWithPaths, ...textAssets];
     const validatedAssets = await validateR2Assets(assetsWithPaths);
     await persistPackageAssets(client, job, validatedAssets.map(({ filePath: _filePath, ...asset }) => asset));
 
@@ -1014,7 +1049,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       manifest,
       normalizedMasterPath: includeMaster ? normalizedMasterPath : undefined,
       exports: exportArtifactsWithPaths,
-      assets: [...clipArtifacts, ...thumbnailArtifacts, ...textAssets],
+      assets: textAssets,
       readmeText: readmeForPackage(manifest),
     }));
     const artifactObjectKey = await uploadPackageZip({
@@ -1050,6 +1085,8 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       finalEditDurationSeconds: finalEdit.durationSeconds,
       finalEditTargetSeconds,
       finalEditClipCount: editClipPlan.length,
+      verticalEditDurationSeconds: verticalEdit.durationSeconds,
+      verticalEditClipCount: verticalClipPlan.length,
       exportCount: exportArtifacts.length,
       clipPlanCount: analysis.clipPlan.length,
       assetCount: validatedAssets.length + 1,

@@ -35,7 +35,8 @@ export async function createPackageZip(input: {
     archive.pipe(output);
     if (input.normalizedMasterPath) archive.file(input.normalizedMasterPath, { name: `master/${input.manifest.normalizedMaster.fileName}` });
     for (const artifact of input.exports) {
-      archive.file(artifact.filePath, { name: `clips/landscape_16x9/${artifact.fileName}` });
+      const folder = typeof artifact.metadata?.folder === "string" ? artifact.metadata.folder : "clips/landscape_16x9";
+      archive.file(artifact.filePath, { name: `${folder}/${artifact.fileName}` });
     }
     for (const asset of input.assets) {
       const folder = typeof asset.metadata?.folder === "string" ? asset.metadata.folder : asset.assetType === "thumbnail" ? "thumbnails" : asset.assetType === "caption" ? "captions/srt" : asset.assetType === "metadata" ? "metadata" : "metadata";

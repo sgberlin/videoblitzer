@@ -35,6 +35,12 @@ function filterForPreset(preset: ExportPreset) {
   return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}`;
 }
 
+function folderForPreset(preset: ExportPreset) {
+  if (preset.aspectRatio === "9:16") return "clips/vertical_9x16";
+  if (preset.aspectRatio === "1:1") return "clips/square_1x1";
+  return "clips/landscape_16x9";
+}
+
 function audioArgs(hasAudio: boolean, bitrate = "128k") {
   return hasAudio ? ["-c:a", "aac", "-b:a", bitrate] : ["-an"];
 }
@@ -115,7 +121,7 @@ export async function createFastNormalizedMasterWithAudio(videoPath: string, aud
   ], { timeoutMs: ffmpegTimeoutMs, progressDurationSeconds: durationSeconds ?? undefined, onProgress });
 }
 
-export async function renderPresetExport(inputPath: string, outputPath: string, preset: ExportPreset, hasAudio = true, durationSeconds?: number | null, onProgress?: ProgressReporter) {
+export async function renderPresetExport(inputPath: string, outputPath: string, preset: ExportPreset, hasAudio = true, durationSeconds?: number | null, onProgress?: ProgressReporter, audioFilter?: string) {
   await runCommand("ffmpeg", [
     "-y",
     ...ffmpegProgressArgs(),
@@ -123,6 +129,7 @@ export async function renderPresetExport(inputPath: string, outputPath: string, 
     "-map", "0:v:0",
     ...(hasAudio ? ["-map", "0:a:0?"] : []),
     "-vf", filterForPreset(preset),
+    ...(hasAudio && audioFilter ? ["-af", audioFilter] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "22",
@@ -223,6 +230,7 @@ export async function createFinalEdit(input: {
   workdir: string;
   hasAudio?: boolean;
   onProgress?: ProgressReporter;
+  audioFilter?: string;
 }) {
   const editListPath = path.join(input.workdir, "final-edit.concat.txt");
   const clips = input.clipPlan
@@ -242,6 +250,7 @@ export async function createFinalEdit(input: {
     "-i", editListPath,
     "-map", "0:v:0",
     ...(input.hasAudio ? ["-map", "0:a:0?"] : []),
+    ...(input.hasAudio && input.audioFilter ? ["-af", input.audioFilter] : []),
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-crf", "21",
@@ -263,6 +272,7 @@ export async function exportStage(input: {
   hasAudio?: boolean;
   durationSeconds?: number;
   onProgress?: ProgressReporter;
+  audioFilter?: string;
 }) {
   const selectedPresets = selectPackagePresets(input.requestedPresetIds);
   if (!selectedPresets.length) throw new Error("No valid export presets were selected for package generation.");
@@ -277,7 +287,7 @@ export async function exportStage(input: {
       label: preset.label,
       current: index + 1,
       total: selectedPresets.length,
-    }));
+    }), input.audioFilter);
     const objectKey = `packages/exports/${input.userId}/${input.projectId}/${input.packageJobId}/${fileName}`;
     await uploadFileToR2(filePath, objectKey, "video/mp4");
     artifacts.push({
@@ -293,7 +303,7 @@ export async function exportStage(input: {
       platform: preset.target,
       aspectRatio: preset.aspectRatio,
       validationStatus: "pending",
-      metadata: { presetId: preset.id, socialStandard: preset.target },
+      metadata: { presetId: preset.id, socialStandard: preset.target, folder: folderForPreset(preset) },
     });
     await input.onProgress?.({ percent: Math.round(((index + 1) / selectedPresets.length) * 100), seconds: input.durationSeconds ?? 0, label: preset.label, current: index + 1, total: selectedPresets.length });
   }
