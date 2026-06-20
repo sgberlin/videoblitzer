@@ -397,7 +397,7 @@ function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSec
 
 function voiceModulationFilter(options: Record<string, unknown>) {
   if (options.voiceModulation === false) return undefined;
-  return "asetrate=48000*1.01,aresample=48000,atempo=0.9901,loudnorm=I=-16:TP=-1.5:LRA=11";
+  return "asetrate=48000*1.002,aresample=48000,atempo=0.998,loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function isSchemaCacheMissingColumn(error: unknown) {
@@ -885,7 +885,7 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
 
 function readmeForPackage(manifest: PackageManifest) {
   const formula = manifest.packageFormula ?? {};
-  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nPackage formula:\n- 16:9 highlights: goals, penalties, big chances, red cards, VAR, saves, and late drama; target ${formula.landscapeTargetSeconds ?? "15-20 min"} seconds; actual ${formula.landscapeActualSeconds ?? "unknown"} seconds.\n- 9:16 goal reel: goals only, or up to three big chances if no goals; max ${formula.verticalMaximumSeconds ?? verticalReelMaximumSeconds} seconds; actual ${formula.verticalActualSeconds ?? "unknown"} seconds.\n- Captions: assets ${formula.captionAssetsEnabled === false ? "off" : "on"}; embedded ${formula.embeddedCaptionsEnabled ? "on" : "off"}.\n- Voice modulation: ${formula.voiceModulation ? "5% pitch deviation" : "off"}.\n- Vertical framing: action-safe full-field foreground over blurred vertical background.\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n`;
+  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nPackage formula:\n- 16:9 highlights: goals, penalties, big chances, red cards, VAR, saves, and late drama; target ${formula.landscapeTargetSeconds ?? "15-20 min"} seconds; actual ${formula.landscapeActualSeconds ?? "unknown"} seconds.\n- 9:16 goal reel: goals only, or up to three big chances if no goals; max ${formula.verticalMaximumSeconds ?? verticalReelMaximumSeconds} seconds; actual ${formula.verticalActualSeconds ?? "unknown"} seconds.\n- Captions: assets ${formula.captionAssetsEnabled === false ? "off" : "on"}; embedded ${formula.embeddedCaptionsEnabled ? "on" : "off"}.\n- Voice modulation: ${formula.voiceModulation ? "minimal pitch deviation" : "off"}.\n- Vertical framing: full-screen vertical crop for short-form reels.\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one short 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when explicitly selected and separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n`;
 }
 
 async function processPackageJob(client: WorkerClient, job: PackageJob) {
@@ -904,7 +904,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     const mode = packageMode(job);
     const variant = packageVariant(job);
     const options = packageOptions(job);
-    const includeMaster = Boolean(audioSourceObjectKey);
+    const includeMaster = Boolean(audioSourceObjectKey) && optionBoolean(options, "includeMaster", false);
     const includeCaptions = optionBoolean(options, "includeCaptions", true);
     const burnCaptions = includeCaptions && optionBoolean(options, "burnCaptions", true);
     const voiceFilter = voiceModulationFilter(options);

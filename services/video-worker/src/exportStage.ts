@@ -29,13 +29,14 @@ export function selectPackagePresets(requestedPresetIds: string[] = []) {
 }
 
 function filterForPreset(preset: ExportPreset) {
+  const finish = ",eq=contrast=1.015:saturation=1.02";
   if (preset.aspectRatio === "source") {
-    return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2`;
+    return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=decrease,pad=${preset.width}:${preset.height}:(ow-iw)/2:(oh-ih)/2${finish}`;
   }
   if (preset.aspectRatio === "9:16") {
-    return "scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,unsharp=5:5:0.2";
+    return `scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920,unsharp=5:5:0.2${finish}`;
   }
-  return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}`;
+  return `scale=${preset.width}:${preset.height}:force_original_aspect_ratio=increase,crop=${preset.width}:${preset.height}${finish}`;
 }
 
 function folderForPreset(preset: ExportPreset) {
@@ -64,6 +65,10 @@ function intermediateVideoArgs() {
   return ["-c:v", "libx264", "-preset", "superfast", "-crf", "24", "-maxrate", "5500k", "-bufsize", "11000k"];
 }
 
+function normalizedMasterVideoArgs() {
+  return ["-c:v", "libx264", "-preset", "superfast", "-crf", "25", "-maxrate", "4500k", "-bufsize", "9000k"];
+}
+
 function ffmpegProgressArgs() {
   return ["-nostats", "-progress", "pipe:1"];
 }
@@ -75,9 +80,7 @@ export async function createNormalizedMaster(inputPath: string, outputPath: stri
     "-i", inputPath,
     "-map", "0:v:0",
     ...(hasAudio ? ["-map", "0:a:0?"] : []),
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-crf", "20",
+    ...normalizedMasterVideoArgs(),
     "-pix_fmt", "yuv420p",
     ...audioArgs(hasAudio, "192k"),
     "-movflags", "+faststart",
@@ -94,9 +97,7 @@ export async function createNormalizedMasterWithAudio(videoPath: string, audioPa
     "-map", "0:v:0",
     "-map", "1:a:0",
     "-shortest",
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-crf", "20",
+    ...normalizedMasterVideoArgs(),
     "-pix_fmt", "yuv420p",
     "-af", "loudnorm=I=-16:TP=-1.5:LRA=11",
     "-c:a", "aac",
