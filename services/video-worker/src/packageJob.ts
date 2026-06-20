@@ -397,7 +397,7 @@ function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSec
 
 function voiceModulationFilter(options: Record<string, unknown>) {
   if (options.voiceModulation === false) return undefined;
-  return "asetrate=48000*1.05,aresample=48000,atempo=0.95238,loudnorm=I=-16:TP=-1.5:LRA=11";
+  return "asetrate=48000*1.01,aresample=48000,atempo=0.9901,loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function isSchemaCacheMissingColumn(error: unknown) {
