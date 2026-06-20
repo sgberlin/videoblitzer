@@ -267,6 +267,12 @@ function openDownloadUrl(url: string) {
 }
 
 function PackageProgressPanel({ job, onDownload, downloadBusy }: { job: PackageJob | null; onDownload: () => void; downloadBusy: boolean }) {
+  const [, setTimerTick] = useState(0);
+  useEffect(() => {
+    if (job?.status !== "processing") return;
+    const timer = window.setInterval(() => setTimerTick((value) => value + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [job?.status]);
   const stage = String(job?.status === "completed" ? "completed" : job?.stage ?? job?.output?.stage ?? "queued");
   const progress = Math.min(100, Math.max(0, Number(job?.progress ?? 0)));
   const activeIndex = Math.max(0, packageStages.findIndex((item) => item.key === stage || (stage === "completed" && item.key === "completed")));

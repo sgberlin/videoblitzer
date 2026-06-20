@@ -102,8 +102,8 @@ function stageProgressReporter(input: {
     const rawStagePercent = Number(progress.percent);
     const stagePercent = Number.isFinite(rawStagePercent) ? Math.min(100, Math.max(0, Math.round(rawStagePercent))) : 0;
     const overallProgress = Math.max(lastProgress, clampProgress(input.startProgress + ((input.endProgress - input.startProgress) * stagePercent) / 100));
-    if (overallProgress === lastProgress && nowMs - lastUpdateAt < (input.throttleMs ?? 4000)) return;
-    if (nowMs - lastUpdateAt < (input.throttleMs ?? 4000) && stagePercent < 100) return;
+    if (overallProgress === lastProgress && nowMs - lastUpdateAt < (input.throttleMs ?? 1500)) return;
+    if (nowMs - lastUpdateAt < (input.throttleMs ?? 1500) && stagePercent < 100) return;
     lastUpdateAt = nowMs;
     lastProgress = overallProgress;
     await updatePackageState(input.client, input.job.id, "processing", {
@@ -361,19 +361,13 @@ function isGoalClip(clip: PackageManifest["clipPlan"][number]) {
   return text.includes("goal") || text.includes("penalty scored");
 }
 
-function isVerticalFallbackClip(clip: PackageManifest["clipPlan"][number]) {
-  const text = clipText(clip);
-  return text.includes("miss") || text.includes("big chance") || text.includes("shot on target") || text.includes("penalty") || text.includes("save");
-}
-
 function isClipPlanItem(clip: PackageManifest["clipPlan"][number] | null): clip is PackageManifest["clipPlan"][number] {
   return clip !== null && clip.endSeconds > clip.startSeconds;
 }
 
 function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSeconds: number) {
   const goals = clipPlan.filter(isGoalClip);
-  const source = goals.length ? goals : clipPlan.filter(isVerticalFallbackClip);
-  const selected = (source.length ? source : clipPlan.slice(0, 3)).slice(0, goals.length ? goals.length : 3);
+  const selected = goals;
   let total = 0;
   return selected.map((clip, index) => {
     const center = Math.min(durationSeconds, Math.max(0, clip.startSeconds + Math.max(35, (clip.endSeconds - clip.startSeconds) * 0.7)));
@@ -397,7 +391,7 @@ function verticalReelClipPlan(clipPlan: PackageManifest["clipPlan"], durationSec
 
 function voiceModulationFilter(options: Record<string, unknown>) {
   if (options.voiceModulation === false) return undefined;
-  return "asetrate=48000*1.002,aresample=48000,atempo=0.998,loudnorm=I=-16:TP=-1.5:LRA=11";
+  return "loudnorm=I=-16:TP=-1.5:LRA=11";
 }
 
 function isSchemaCacheMissingColumn(error: unknown) {
@@ -885,7 +879,7 @@ function socialContentForPackage(job: PackageJob, clipPlan: PackageManifest["cli
 
 function readmeForPackage(manifest: PackageManifest) {
   const formula = manifest.packageFormula ?? {};
-  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nPackage formula:\n- 16:9 highlights: goals, penalties, big chances, red cards, VAR, saves, and late drama; target ${formula.landscapeTargetSeconds ?? "15-20 min"} seconds; actual ${formula.landscapeActualSeconds ?? "unknown"} seconds.\n- 9:16 goal reel: goals only, or up to three big chances if no goals; max ${formula.verticalMaximumSeconds ?? verticalReelMaximumSeconds} seconds; actual ${formula.verticalActualSeconds ?? "unknown"} seconds.\n- Captions: assets ${formula.captionAssetsEnabled === false ? "off" : "on"}; embedded ${formula.embeddedCaptionsEnabled ? "on" : "off"}.\n- Voice modulation: ${formula.voiceModulation ? "minimal pitch deviation" : "off"}.\n- Vertical framing: full-screen vertical crop for short-form reels.\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one short 9:16 goals reel, or missed-goals/big-chances reel if there are no goals.\n- master: included only when explicitly selected and separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n`;
+  return `VideoBlitzer Highlights Package\n\nSource video: ${manifest.videoId ?? "unknown"}\nGenerated: ${manifest.generatedAt}\n\nPackage formula:\n- 16:9 highlights: goals, penalties, big chances, red cards, VAR, saves, and late drama; target ${formula.landscapeTargetSeconds ?? "15-20 min"} seconds; actual ${formula.landscapeActualSeconds ?? "unknown"} seconds.\n- 9:16 goal reel: confirmed goals only; max ${formula.verticalMaximumSeconds ?? verticalReelMaximumSeconds} seconds; actual ${formula.verticalActualSeconds ?? "skipped"} seconds.\n- Captions: assets ${formula.captionAssetsEnabled === false ? "off" : "on"}; embedded ${formula.embeddedCaptionsEnabled ? "on" : "off"}.\n- Voice treatment: ${formula.voiceModulation ? "loudness normalized, no pitch shift" : "off"}.\n- Vertical framing: full-screen vertical crop for short-form reels.\n\nVideo deliverables:\n- clips/landscape_16x9: one 16:9 match highlights edit, target 15-20 minutes.\n- clips/vertical_9x16: one short 9:16 goal reel when confirmed goal clips are available.\n- master: included only when explicitly selected and separate audio was merged with the uploaded video.\n\nSupporting files:\n- captions/srt: social hook caption files when captions are enabled.\n- metadata: social text and package metadata.\n- manifest.json: machine-readable package details.\n`;
 }
 
 async function processPackageJob(client: WorkerClient, job: PackageJob) {
@@ -1009,9 +1003,9 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
     }));
 
     const verticalClipPlan = verticalReelClipPlan(analysis.clipPlan, analysis.durationSeconds);
-    await markStage(client, job, "rendering_clips", 55, { verticalClipCount: verticalClipPlan.length });
+    await markStage(client, job, "rendering_clips", 55, { verticalClipCount: verticalClipPlan.length, skipped: verticalClipPlan.length === 0 ? "No confirmed goal clips were available for the 9:16 goal reel." : undefined });
     const reportClipProgress = stageProgressReporter({ client, job, stage: "rendering_clips", startProgress: 55, endProgress: 70 });
-    const verticalEdit = await withHeartbeat(client, job, "rendering_clips", () => createFinalEdit({
+    const verticalEdit = verticalClipPlan.length ? await withHeartbeat(client, job, "rendering_clips", () => createFinalEdit({
       masterPath: normalizedMasterPath,
       outputPath: verticalEditPath,
       clipPlan: verticalClipPlan,
@@ -1021,7 +1015,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       audioFilter: voiceFilter,
       burnCaptions,
       captionFontSize: 44,
-    }));
+    })) : null;
 
     await markStage(client, job, "preset_exports", 70, { exportPlan: "one 16:9 highlights video and one 9:16 goals reel" });
     const requestedPresetIds = Array.isArray(job.input?.presetIds) ? (job.input?.presetIds as string[]) : [];
@@ -1036,8 +1030,9 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
         packageJobId: job.id,
         hasAudio: hasAudioForExports,
         durationSeconds: finalEdit.durationSeconds,
-        onProgress: (progress) => reportExportProgress({ ...progress, percent: Math.round(progress.percent * 0.5), label: `16:9 highlights ${progress.label ?? ""}`.trim(), current: 1, total: 2 }),
+        onProgress: (progress) => reportExportProgress({ ...progress, percent: verticalEdit ? Math.round(progress.percent * 0.5) : progress.percent, label: `16:9 highlights ${progress.label ?? ""}`.trim(), current: 1, total: verticalEdit ? 2 : 1 }),
       });
+      if (!verticalEdit) return [...landscape];
       const vertical = await exportStage({
         masterPath: verticalEditPath,
         exportsDir,
@@ -1070,11 +1065,12 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       landscapePlannedSeconds: clipPlanDuration(editClipPlan),
       landscapeActualSeconds: finalEdit.durationSeconds,
       landscapeClipCount: editClipPlan.length,
-      verticalContent: "9:16 goals only, falling back to up to three big chances if no goals are present.",
+      verticalContent: "9:16 confirmed goals only. Skipped when no confirmed goal clips are available.",
       verticalMaximumSeconds: verticalReelMaximumSeconds,
       verticalPlannedSeconds: clipPlanDuration(verticalClipPlan),
-      verticalActualSeconds: verticalEdit.durationSeconds,
+      verticalActualSeconds: verticalEdit?.durationSeconds ?? null,
       verticalClipCount: verticalClipPlan.length,
+      verticalSkippedReason: verticalClipPlan.length ? undefined : "No confirmed goal clips were available.",
       verticalFraming: "action-safe full-field foreground over blurred vertical background",
       captionAssetsEnabled: includeCaptions,
       embeddedCaptionsEnabled: burnCaptions,
@@ -1144,7 +1140,7 @@ async function processPackageJob(client: WorkerClient, job: PackageJob) {
       finalEditTargetSeconds,
       packageFormula,
       finalEditClipCount: editClipPlan.length,
-      verticalEditDurationSeconds: verticalEdit.durationSeconds,
+      verticalEditDurationSeconds: verticalEdit?.durationSeconds ?? null,
       verticalEditClipCount: verticalClipPlan.length,
       exportCount: exportArtifacts.length,
       clipPlanCount: analysis.clipPlan.length,
