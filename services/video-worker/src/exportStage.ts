@@ -50,6 +50,20 @@ function audioArgs(hasAudio: boolean, bitrate = "128k") {
 
 type ProgressReporter = (progress: CommandProgress & { label?: string; current?: number; total?: number }) => void | Promise<void>;
 
+function exportVideoArgs(preset: ExportPreset) {
+  if (preset.aspectRatio === "9:16") {
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-maxrate", "2200k", "-bufsize", "4400k"];
+  }
+  if (preset.aspectRatio === "1:1") {
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "27", "-maxrate", "2200k", "-bufsize", "4400k"];
+  }
+  return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "26", "-maxrate", "3200k", "-bufsize", "6400k"];
+}
+
+function intermediateVideoArgs() {
+  return ["-c:v", "libx264", "-preset", "superfast", "-crf", "24", "-maxrate", "5500k", "-bufsize", "11000k"];
+}
+
 function ffmpegProgressArgs() {
   return ["-nostats", "-progress", "pipe:1"];
 }
@@ -133,9 +147,7 @@ export async function renderPresetExport(inputPath: string, outputPath: string, 
     ...(hasAudio ? ["-map", "0:a:0?"] : []),
     "-vf", filterForPreset(preset),
     ...(hasAudio && audioFilter ? ["-af", audioFilter] : []),
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-crf", "22",
+    ...exportVideoArgs(preset),
     "-pix_fmt", "yuv420p",
     ...audioArgs(hasAudio),
     "-movflags", "+faststart",
@@ -305,9 +317,7 @@ export async function createFinalEdit(input: {
     ...(input.hasAudio ? ["-map", "0:a:0?"] : []),
     ...(captionFilter ? ["-vf", captionFilter] : []),
     ...(input.hasAudio && input.audioFilter ? ["-af", input.audioFilter] : []),
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-crf", "21",
+    ...intermediateVideoArgs(),
     "-pix_fmt", "yuv420p",
     ...audioArgs(input.hasAudio ?? true, "192k"),
     "-movflags", "+faststart",
